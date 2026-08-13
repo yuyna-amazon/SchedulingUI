@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      15.1
+// @version      15.2
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -22,6 +22,9 @@ function newFunction() {
         const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version)
             ? GM_info.script.version
             : '15.0';
+
+        // === 同一開始時刻あたりの必須上限（超過でハイライト） ===
+        const REQUIRED_LIMIT_PER_TIME = 15;
 
         // === 状態管理 ===
         let currentSSDData = null;
@@ -1128,13 +1131,26 @@ function newFunction() {
                 return a.serviceType.localeCompare(b.serviceType);
             });
 
+            // 同じ開始時刻ごとの必須合計（超過判定用）
+            const requiredByTime = {};
+            for (let ri = 0; ri < sortedTimeData.length; ri++) {
+                const key = sortedTimeData[ri].timeMinutes;
+                requiredByTime[key] = (requiredByTime[key] || 0) + (sortedTimeData[ri].required || 0);
+            }
+
             let timeRowsHtml = sortedTimeData.length === 0 ? '<div style="color:#666;padding:10px;">データなし</div>' : '';
             for (let ti = 0; ti < sortedTimeData.length; ti++) {
                 const td = sortedTimeData[ti];
                 const lengthText = (td.blockLength === '' || td.blockLength === undefined || td.blockLength === null) ? '-' : td.blockLength;
+                const timeTotal = requiredByTime[td.timeMinutes] || 0;
+                const isOver = timeTotal > REQUIRED_LIMIT_PER_TIME;
+                const rowStyle = isOver
+                    ? 'background:#ffebee;border-left:3px solid #f44336;'
+                    : 'background:#f5f5f5;';
                 timeRowsHtml +=
-                    '<div style="display:grid;grid-template-columns:60px 96px 46px 42px 42px;gap:6px;margin:3px 0;padding:6px 8px;background:#f5f5f5;border-radius:3px;align-items:center;">' +
-                    '<span style="font-weight:bold;font-size:11px;">' + td.time + '</span>' +
+                    '<div style="display:grid;grid-template-columns:60px 96px 46px 42px 42px;gap:6px;margin:3px 0;padding:6px 8px;' + rowStyle + 'border-radius:3px;align-items:center;"' +
+                    (isOver ? ' title="' + td.time + ' の必須合計 ' + timeTotal + ' (上限' + REQUIRED_LIMIT_PER_TIME + '超過)"' : '') + '>' +
+                    '<span style="font-weight:bold;font-size:11px;white-space:nowrap;">' + td.time + '</span>' +
                     '<span style="font-size:10px;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + td.serviceType + '">' + getShortServiceType(td.serviceType) + '</span>' +
                     '<span style="color:#795548;font-weight:bold;text-align:center;font-size:11px;">' + lengthText + '</span>' +
                     '<span style="color:#FF9800;font-weight:bold;text-align:center;">' + td.required + '</span>' +
