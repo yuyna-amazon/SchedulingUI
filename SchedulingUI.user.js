@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      14.2
+// @version      15.0
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -17,6 +17,11 @@ newFunction();
 function newFunction() {
     (function () {
         'use strict';
+
+        // === スクリプトバージョン（ヘッダーの @version と同期） ===
+        const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version)
+            ? GM_info.script.version
+            : '15.0';
 
         // === 状態管理 ===
         let currentSSDData = null;
@@ -1119,10 +1124,12 @@ function newFunction() {
             let timeRowsHtml = sortedTimeData.length === 0 ? '<div style="color:#666;padding:10px;">データなし</div>' : '';
             for (let ti = 0; ti < sortedTimeData.length; ti++) {
                 const td = sortedTimeData[ti];
+                const lengthText = (td.blockLength === '' || td.blockLength === undefined || td.blockLength === null) ? '-' : td.blockLength;
                 timeRowsHtml +=
-                    '<div style="display:grid;grid-template-columns:90px 130px 50px 50px;gap:8px;margin:3px 0;padding:6px 8px;background:#f5f5f5;border-radius:3px;align-items:center;">' +
+                    '<div style="display:grid;grid-template-columns:60px 96px 46px 42px 42px;gap:6px;margin:3px 0;padding:6px 8px;background:#f5f5f5;border-radius:3px;align-items:center;">' +
                     '<span style="font-weight:bold;font-size:11px;">' + td.time + '</span>' +
                     '<span style="font-size:10px;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + td.serviceType + '">' + getShortServiceType(td.serviceType) + '</span>' +
+                    '<span style="color:#795548;font-weight:bold;text-align:center;font-size:11px;">' + lengthText + '</span>' +
                     '<span style="color:#FF9800;font-weight:bold;text-align:center;">' + td.required + '</span>' +
                     '<span style="color:#4CAF50;font-weight:bold;text-align:center;">' + td.accepted + '</span>' +
                     '</div>';
@@ -1261,8 +1268,8 @@ function newFunction() {
             rightPanel.style.cssText = 'width:350px;min-width:350px;padding:6px 8px;overflow-y:auto;overflow-x:hidden;box-sizing:border-box;';
             rightPanel.innerHTML =
                 sectionTitle('開始時刻別', '#4CAF50') +
-                '<div style="display:grid;grid-template-columns:90px 130px 50px 50px;gap:8px;margin-bottom:5px;padding:3px 5px;font-weight:bold;color:#666;font-size:10px;">' +
-                '<span>開始時刻</span><span>サービスタイプ</span><span style="text-align:center;">必須</span><span style="text-align:center;">受諾</span>' +
+                '<div style="display:grid;grid-template-columns:60px 96px 46px 42px 42px;gap:6px;margin-bottom:5px;padding:3px 8px;font-weight:bold;color:#666;font-size:10px;">' +
+                '<span>開始時刻</span><span>サービスタイプ</span><span style="text-align:center;">Length</span><span style="text-align:center;">必須</span><span style="text-align:center;">受諾</span>' +
                 '</div>' +
                 timeRowsHtml;
 
@@ -1277,6 +1284,13 @@ function newFunction() {
             toggleBtn.style.cssText = 'position:absolute;top:4px;right:8px;background:none;border:none;font-size:18px;cursor:pointer;color:#999;font-weight:bold;line-height:1;z-index:1;';
             box.style.position = 'fixed';
             box.appendChild(toggleBtn);
+
+            // ×ボタンの左隣にバージョン表示
+            const versionLabel = document.createElement('span');
+            versionLabel.id = 'dsp-version-label';
+            versionLabel.textContent = 'v' + SCRIPT_VERSION;
+            versionLabel.style.cssText = 'position:absolute;top:7px;right:28px;font-size:10px;color:#bbb;font-weight:bold;line-height:1;z-index:1;pointer-events:none;';
+            box.appendChild(versionLabel);
 
             document.body.appendChild(box);
 
@@ -1298,6 +1312,7 @@ function newFunction() {
                 toggleBtn.style.borderRadius = '4px';
                 toggleBtn.style.border = '1px solid #4CAF50';
                 toggleBtn.style.whiteSpace = 'nowrap';
+                versionLabel.style.display = 'none';
                 isHidden = true;
             };
             var showUI = function () {
@@ -1317,6 +1332,7 @@ function newFunction() {
                 toggleBtn.style.borderRadius = '0';
                 toggleBtn.style.border = 'none';
                 toggleBtn.style.whiteSpace = '';
+                versionLabel.style.display = '';
                 isHidden = false;
             };
             toggleBtn.addEventListener('click', function () {
