@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      15.0
+// @version      15.1
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -1115,10 +1115,17 @@ function newFunction() {
                 '</div>';
 
             // ---- 右パネル：開始時刻別 ----
+            const lengthValue = function (v) {
+                const n = parseFloat(v);
+                return isNaN(n) ? -Infinity : n;
+            };
             const sortedTimeData = currentTimeDataList.slice().sort(function (a, b) {
-                return a.timeMinutes !== b.timeMinutes
-                    ? a.timeMinutes - b.timeMinutes
-                    : a.serviceType.localeCompare(b.serviceType);
+                if (a.timeMinutes !== b.timeMinutes) return a.timeMinutes - b.timeMinutes;
+                // 同じ開始時刻はLengthの長い順
+                const la = lengthValue(a.blockLength);
+                const lb = lengthValue(b.blockLength);
+                if (la !== lb) return lb - la;
+                return a.serviceType.localeCompare(b.serviceType);
             });
 
             let timeRowsHtml = sortedTimeData.length === 0 ? '<div style="color:#666;padding:10px;">データなし</div>' : '';
