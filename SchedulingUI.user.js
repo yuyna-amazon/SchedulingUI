@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      15.2
+// @version      16.0
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -63,19 +63,43 @@ function newFunction() {
         };
         const C1C3_OVERRIDE_DEFAULTS = { 'SSD_C1': 0, 'SSD_C3': 0, 'SSD_C1_1': 0, 'SSD_C1_1B': 0, 'SSD_C3_3B': 0, 'SSD_C3_4': 0, 'CVP_BUF_1': 0, 'CVP_BUF_1B': 0, 'CVP_BUF_3B': 0, 'CVP_BUF_4': 0 };
 
-        const SSD_TIME_RANGES = [
-            { key: 'SSD_1', min: 0, max: 360 },
-            { key: 'SSD_C1', min: 360, max: 360 }, // 現行仕様維持（手入力override用）
-            { key: 'SSD_1_B', min: 360, max: 540 },
-            { key: 'SSD_2', min: 540, max: 720 },
-            { key: 'SSD_3', min: 720, max: 960 },
-            { key: 'SSD_C3', min: 960, max: 960 }, // 現行仕様維持（手入力override用）
-            { key: 'SSD_3_B', min: 960, max: 1140 },
-            { key: 'SSD_4', min: 1140, max: Infinity }
+        // === SSD時間帯（分, min <= 開始時刻 < max）===
+        // 設定パネル（⚙）から変更可能。max: null = 上限なし（Infinity）
+        const SSD_TIME_RANGE_DEFAULTS = {
+            'SSD_1': { min: 0, max: 360 },
+            'SSD_C1': { min: 360, max: 360 }, // 現行仕様維持（手入力override用）
+            'SSD_1_B': { min: 360, max: 540 },
+            'SSD_2': { min: 540, max: 720 },
+            'SSD_3': { min: 720, max: 960 },
+            'SSD_C3': { min: 960, max: 960 }, // 現行仕様維持（手入力override用）
+            'SSD_3_B': { min: 960, max: 1140 },
+            'SSD_4': { min: 1140, max: null }  // null = Infinity
+        };
+        const SSD_TIME_RANGE_ORDER = ['SSD_1', 'SSD_C1', 'SSD_1_B', 'SSD_2', 'SSD_3', 'SSD_C3', 'SSD_3_B', 'SSD_4'];
+
+        // 同じ境界時刻を共有するフィールド（連動用）
+        const SSD_TIME_BOUNDARY_GROUPS = [
+            ['SSD_1.min'],
+            ['SSD_1.max', 'SSD_C1.min', 'SSD_C1.max', 'SSD_1_B.min'],
+            ['SSD_1_B.max', 'SSD_2.min'],
+            ['SSD_2.max', 'SSD_3.min'],
+            ['SSD_3.max', 'SSD_C3.min', 'SSD_C3.max', 'SSD_3_B.min'],
+            ['SSD_3_B.max', 'SSD_4.min']
         ];
+
+        // 実際に判定で使う配列（applySSDTimeRanges() で構築）
+        let SSD_TIME_RANGES = SSD_TIME_RANGE_ORDER.map(k => ({
+            key: k,
+            min: SSD_TIME_RANGE_DEFAULTS[k].min,
+            max: SSD_TIME_RANGE_DEFAULTS[k].max === null ? Infinity : SSD_TIME_RANGE_DEFAULTS[k].max
+        }));
 
         const SSD_LIST = ['SSD_1', 'SSD_1_B', 'SSD_2', 'SSD_3', 'SSD_3_B', 'SSD_4', 'SSD_C1', 'SSD_C3'];
         const SPR_LIST = ['SSD_1', 'SSD_1_B', 'SSD_2', 'SSD_3', 'SSD_3_B', 'SSD_4'];
+
+        // === SSD表示名（内部キーは固定、表示・Excel出力名のみ変更可）===
+        const SSD_LABEL_DEFAULTS = {};
+        SSD_TIME_RANGE_ORDER.forEach(k => { SSD_LABEL_DEFAULTS[k] = k; });
 
         // === 未来1週間必須ダウンロード設定 ===
         // 横 = 日付 / 縦 = SSD
@@ -296,6 +320,125 @@ function newFunction() {
         const getC1C3Overrides = () => getStorage('dsp-c1c3-overrides', C1C3_OVERRIDE_DEFAULTS);
         const saveC1C3Overrides = (v) => setStorage('dsp-c1c3-overrides', v);
         const get1B3BFixedMode = () => true;
+        // SPR算出パネルの開閉状態（再描画をまたいで保持）
+        const getSprCalcPanelOpen = () => getStorage('dsp-spr-calc-open', false);
+        const saveSprCalcPanelOpen = (v) => setStorage('dsp-spr-calc-open', !!v);
+        // Block数の集計基準（必須 / 受諾）
+        const getSprCalcBasis = () => (getStorage('dsp-spr-calc-basis', 'required') === 'accepted' ? 'accepted' : 'required');
+        const saveSprCalcBasis = (v) => setStorage('dsp-spr-calc-basis', v === 'accepted' ? 'accepted' : 'required');
+        // SPR算出パネル用のSPR（Cycle × Length ごと / Block数に掛けてVolを算出）
+        // 形式: { 'SSD_1': { '5': 60.9, '4.5': 51.8, ... }, ... }
+        const getSprCalcLenSpr = () => {
+            const stored = getStorage('dsp-spr-calc-len-spr', {});
+            const out = {};
+            SPR_LIST.forEach(k => {
+                out[k] = {};
+                const row = stored && typeof stored[k] === 'object' && stored[k] ? stored[k] : {};
+                Object.keys(row).forEach(l => {
+                    const v = Number(row[l]);
+                    if (Number.isFinite(v) && v > 0) out[k][l] = v;
+                });
+            });
+            return out;
+        };
+        const saveSprCalcLenSpr = (v) => setStorage('dsp-spr-calc-len-spr', v);
+        // 参照ファイル 19〜24行目の CVP Vol（Cycleごと）
+        const CVP_VOL_DEFAULTS = {};
+        SPR_LIST.forEach(k => { CVP_VOL_DEFAULTS[k] = 0; });
+        const getCvpVol = () => {
+            const stored = getStorage('dsp-cvp-vol', CVP_VOL_DEFAULTS);
+            const out = {};
+            SPR_LIST.forEach(k => {
+                const v = Number(stored && stored[k]);
+                out[k] = Number.isFinite(v) && v > 0 ? v : 0;
+            });
+            return out;
+        };
+        const saveCvpVol = (v) => setStorage('dsp-cvp-vol', v);
+        // 算出SPRを左パネルのSPR（倍率）へ反映するか
+        const getSprCalcApply = () => getStorage('dsp-spr-calc-apply', false);
+        const saveSprCalcApply = (v) => setStorage('dsp-spr-calc-apply', !!v);
+        // ON にする直前のSPR（OFF で復元する）
+        const getSprCalcMultBackup = () => getStorage('dsp-spr-calc-mult-backup', SSD_DEFAULTS);
+        const saveSprCalcMultBackup = (v) => setStorage('dsp-spr-calc-mult-backup', v);
+
+        // === SSD表示名 ===
+        const getSSDLabels = () => {
+            const stored = getStorage('dsp-ssd-labels', SSD_LABEL_DEFAULTS);
+            const out = {};
+            SSD_TIME_RANGE_ORDER.forEach(k => {
+                const v = stored && typeof stored[k] === 'string' ? stored[k].trim() : '';
+                out[k] = v || k;
+            });
+            return out;
+        };
+        const saveSSDLabels = (v) => setStorage('dsp-ssd-labels', v);
+
+        let ssdLabelCache = null;
+        const ssdLabel = (key) => {
+            if (!ssdLabelCache) ssdLabelCache = getSSDLabels();
+            return ssdLabelCache[key] || key;
+        };
+        const refreshSSDLabelCache = () => { ssdLabelCache = getSSDLabels(); };
+
+        // 内部キー / 表示名 のどちらでも Cycle を解決
+        const resolveSSDKey = (name) => {
+            const n = String(name === undefined || name === null ? '' : name).trim().toLowerCase();
+            if (!n) return null;
+            for (let i = 0; i < SPR_LIST.length; i++) {
+                const k = SPR_LIST[i];
+                if (k.toLowerCase() === n) return k;
+                if (String(ssdLabel(k)).trim().toLowerCase() === n) return k;
+            }
+            return null;
+        };
+
+        const escapeHtml = (s) => String(s === undefined || s === null ? '' : s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+        // === SSD時間帯設定 ===
+        const minutesToHHMM = (m) => {
+            const v = Math.max(0, Math.min(1439, Math.round(Number(m) || 0)));
+            return String(Math.floor(v / 60)).padStart(2, '0') + ':' + String(v % 60).padStart(2, '0');
+        };
+
+        const hhmmToMinutes = (s) => {
+            const match = /^(\d{1,2}):(\d{2})$/.exec(String(s || '').trim());
+            if (!match) return null;
+            const h = +match[1];
+            const mi = +match[2];
+            if (h > 23 || mi > 59) return null;
+            return h * 60 + mi;
+        };
+
+        const getSSDTimeRangeConfig = () => {
+            const stored = getStorage('dsp-ssd-time-ranges', SSD_TIME_RANGE_DEFAULTS);
+            const cfg = {};
+            SSD_TIME_RANGE_ORDER.forEach(k => {
+                const def = SSD_TIME_RANGE_DEFAULTS[k];
+                const v = (stored && typeof stored[k] === 'object' && stored[k]) ? stored[k] : {};
+                const min = Number.isFinite(Number(v.min)) ? Number(v.min) : def.min;
+                const max = (v.max === null || v.max === undefined || v.max === '' || !Number.isFinite(Number(v.max)))
+                    ? def.max
+                    : Number(v.max);
+                cfg[k] = { min, max };
+            });
+            return cfg;
+        };
+
+        const saveSSDTimeRangeConfig = (cfg) => setStorage('dsp-ssd-time-ranges', cfg);
+
+        const applySSDTimeRanges = () => {
+            const cfg = getSSDTimeRangeConfig();
+            SSD_TIME_RANGES = SSD_TIME_RANGE_ORDER.map(k => ({
+                key: k,
+                min: cfg[k].min,
+                max: cfg[k].max === null ? Infinity : cfg[k].max
+            }));
+        };
+
+        applySSDTimeRanges();
 
         // === 日付 ===
         const getDateForFileName = () => {
@@ -798,7 +941,7 @@ function newFunction() {
                 const baseAcc = getBaseAccepted(ssd, d, overrides);
                 const soft = calculateCycleSoft(ssd, baseAcc, adj, m, pct, overrides, subtract, softAdj, currentSSDData, multipliers);
 
-                wsData.push(['VFK1', ssd, soft, Math.round(soft * (1 + hardPct / 100))]);
+                wsData.push(['VFK1', ssdLabel(ssd), soft, Math.round(soft * (1 + hardPct / 100))]);
             }
 
             const wb = XLSX.utils.book_new();
@@ -1043,6 +1186,607 @@ function newFunction() {
         };
 
         // =====================================================
+        // === SSD時間帯設定モーダル
+        // =====================================================
+        const openTimeRangeSettings = () => {
+            document.getElementById('dsp-timerange-modal')?.remove();
+
+            const cfg = getSSDTimeRangeConfig();
+            const labels = getSSDLabels();
+
+            // fieldId ('SSD_1.max') → 境界グループ番号
+            const groupOf = {};
+            SSD_TIME_BOUNDARY_GROUPS.forEach((g, gi) => g.forEach(fid => { groupOf[fid] = gi; }));
+
+            const overlay = document.createElement('div');
+            overlay.id = 'dsp-timerange-modal';
+            overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:2147483647;display:flex;align-items:center;justify-content:center;font-family:Arial,sans-serif;';
+
+            const GRID_COLS = 'display:grid;grid-template-columns:130px 96px 12px 96px;gap:8px;align-items:center;';
+
+            let rowsHtml = '';
+            SSD_TIME_RANGE_ORDER.forEach(k => {
+                const r = cfg[k];
+                const isC = (k === 'SSD_C1' || k === 'SSD_C3');
+                const isLast = (r.max === null);
+                rowsHtml +=
+                    '<div style="' + GRID_COLS + 'padding:3px 0;' + (isC ? 'background:#fafafa;' : '') + '">' +
+                    '<input type="text" id="tr-' + k + '-name" value="' + escapeHtml(labels[k]) + '" maxlength="40" placeholder="' + k + '" title="' + k + '"' +
+                    ' style="width:100%;padding:3px;border:1px solid ' + (isC ? '#ddd' : '#90CAF9') + ';border-radius:4px;text-align:center;font-size:11px;font-weight:bold;box-sizing:border-box;color:' + (isC ? '#888' : '#1565C0') + ';" />' +
+                    '<input type="time" id="tr-' + k + '-min" value="' + minutesToHHMM(r.min) + '"' +
+                    ' style="width:100%;padding:3px;border:1px solid #ccc;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;" />' +
+                    '<span style="font-size:11px;color:#888;text-align:center;">～</span>' +
+                    (isLast
+                        ? '<input type="text" id="tr-' + k + '-max" value="以降" disabled' +
+                        ' style="width:100%;padding:3px;border:1px solid #eee;border-radius:4px;text-align:center;font-size:12px;color:#999;background:#f5f5f5;box-sizing:border-box;" />'
+                        : '<input type="time" id="tr-' + k + '-max" value="' + minutesToHHMM(r.max) + '"' +
+                        ' style="width:100%;padding:3px;border:1px solid #ccc;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;" />') +
+                    '</div>';
+            });
+
+            const panel = document.createElement('div');
+            panel.style.cssText = 'background:#fff;border-radius:8px;padding:16px 18px;min-width:440px;max-height:88vh;overflow-y:auto;box-shadow:0 6px 24px rgba(0,0,0,0.3);box-sizing:border-box;';
+            panel.innerHTML =
+                '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">' +
+                '<div style="font-size:14px;font-weight:bold;color:#2e7d32;">SSD設定（名称・時間帯）</div>' +
+                '<button id="tr-close" style="background:none;border:none;font-size:18px;color:#999;cursor:pointer;line-height:1;">×</button>' +
+                '</div>' +
+                '<div style="font-size:10px;color:#777;margin-bottom:10px;">開始時刻が <strong>開始 ≦ 時刻 &lt; 終了</strong> の範囲に入るSSDへ集計されます。名称は画面表示とExcelのCycle列に反映されます。</div>' +
+                '<div style="' + GRID_COLS + 'font-size:10px;font-weight:bold;color:#666;padding-bottom:4px;border-bottom:1px solid #eee;">' +
+                '<span style="text-align:center;">名称</span><span style="text-align:center;">開始</span><span></span><span style="text-align:center;">終了</span>' +
+                '</div>' +
+                rowsHtml +
+                '<label style="display:flex;align-items:center;gap:6px;margin-top:10px;font-size:11px;color:#555;cursor:pointer;">' +
+                '<input type="checkbox" id="tr-link" checked />隣接する境界を連動させる（推奨）' +
+                '</label>' +
+                '<div id="tr-msg" style="font-size:10px;color:#f44336;margin-top:8px;min-height:14px;"></div>' +
+                '<div style="display:flex;gap:6px;margin-top:10px;padding-top:10px;border-top:1px solid #eee;">' +
+                '<button id="tr-save" style="flex:3;padding:7px;background:#4CAF50;color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:12px;font-weight:bold;">保存して再計算</button>' +
+                '<button id="tr-reset" style="flex:2;padding:7px;background:#fff;color:#666;border:1px solid #ccc;border-radius:5px;cursor:pointer;font-size:12px;">初期値に戻す</button>' +
+                '</div>';
+
+            overlay.appendChild(panel);
+            document.body.appendChild(overlay);
+
+            const msgEl = panel.querySelector('#tr-msg');
+            const linkEl = panel.querySelector('#tr-link');
+
+            const readNames = () => {
+                const out = {};
+                SSD_TIME_RANGE_ORDER.forEach(k => {
+                    const el = panel.querySelector('#tr-' + k + '-name');
+                    const v = el ? String(el.value || '').trim() : '';
+                    out[k] = v || k;
+                });
+                return out;
+            };
+
+            const readForm = () => {
+                const out = {};
+                let error = '';
+                SSD_TIME_RANGE_ORDER.forEach(k => {
+                    const def = SSD_TIME_RANGE_DEFAULTS[k];
+                    const minEl = panel.querySelector('#tr-' + k + '-min');
+                    const min = hhmmToMinutes(minEl.value);
+                    if (min === null) error = k + ' の開始時刻が不正です';
+                    let max = def.max === null ? null : hhmmToMinutes(panel.querySelector('#tr-' + k + '-max').value);
+                    if (def.max !== null && max === null) error = k + ' の終了時刻が不正です';
+                    out[k] = { min: min === null ? def.min : min, max: (def.max === null) ? null : (max === null ? def.max : max) };
+                });
+                return { cfg: out, error };
+            };
+
+            const validate = () => {
+                const { cfg: c, error } = readForm();
+                if (error) { msgEl.style.color = '#f44336'; msgEl.textContent = error; return null; }
+
+                const names = readNames();
+
+                // 名称の重複チェック
+                const seen = {};
+                for (const k of SSD_TIME_RANGE_ORDER) {
+                    const n = names[k];
+                    if (seen[n]) {
+                        msgEl.style.color = '#f44336';
+                        msgEl.textContent = '名称が重複しています: ' + n + '（' + seen[n] + ' / ' + k + '）';
+                        return null;
+                    }
+                    seen[n] = k;
+                }
+
+                // 主要SSD（C1/C3以外）は 開始 < 終了 が必須
+                for (const k of SSD_TIME_RANGE_ORDER) {
+                    if (k === 'SSD_C1' || k === 'SSD_C3') continue;
+                    if (c[k].max !== null && c[k].min >= c[k].max) {
+                        msgEl.style.color = '#f44336';
+                        msgEl.textContent = names[k] + ' の開始時刻が終了時刻以上になっています';
+                        return null;
+                    }
+                }
+
+                // 連続性チェック（警告のみ）
+                const chain = ['SSD_1', 'SSD_1_B', 'SSD_2', 'SSD_3', 'SSD_3_B', 'SSD_4'];
+                const gaps = [];
+                for (let i = 0; i < chain.length - 1; i++) {
+                    if (c[chain[i]].max !== c[chain[i + 1]].min) gaps.push(names[chain[i]] + '→' + names[chain[i + 1]]);
+                }
+                if (gaps.length) {
+                    msgEl.style.color = '#F57C00';
+                    msgEl.textContent = '注意: 境界が繋がっていません（' + gaps.join(', ') + '）。集計されない時刻が発生します。';
+                } else {
+                    msgEl.textContent = '';
+                }
+                return { cfg: c, labels: names };
+            };
+
+            // 境界連動
+            SSD_TIME_RANGE_ORDER.forEach(k => {
+                ['min', 'max'].forEach(side => {
+                    const el = panel.querySelector('#tr-' + k + '-' + side);
+                    if (!el || el.disabled) return;
+                    el.addEventListener('change', function () {
+                        if (linkEl.checked) {
+                            const gi = groupOf[k + '.' + side];
+                            if (gi !== undefined) {
+                                SSD_TIME_BOUNDARY_GROUPS[gi].forEach(fid => {
+                                    const target = panel.querySelector('#tr-' + fid.replace('.', '-'));
+                                    if (target && target !== el && !target.disabled) target.value = el.value;
+                                });
+                            }
+                        }
+                        validate();
+                    });
+                });
+            });
+
+            const close = () => overlay.remove();
+            panel.querySelector('#tr-close').addEventListener('click', close);
+            overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+
+            // 名称入力の検証
+            SSD_TIME_RANGE_ORDER.forEach(k => {
+                const el = panel.querySelector('#tr-' + k + '-name');
+                if (el) el.addEventListener('input', validate);
+            });
+
+            panel.querySelector('#tr-reset').addEventListener('click', function () {
+                SSD_TIME_RANGE_ORDER.forEach(k => {
+                    const def = SSD_TIME_RANGE_DEFAULTS[k];
+                    panel.querySelector('#tr-' + k + '-min').value = minutesToHHMM(def.min);
+                    if (def.max !== null) panel.querySelector('#tr-' + k + '-max').value = minutesToHHMM(def.max);
+                    panel.querySelector('#tr-' + k + '-name').value = SSD_LABEL_DEFAULTS[k];
+                });
+                validate();
+            });
+
+            panel.querySelector('#tr-save').addEventListener('click', function () {
+                const result = validate();
+                if (!result) return;
+                saveSSDTimeRangeConfig(result.cfg);
+                saveSSDLabels(result.labels);
+                applySSDTimeRanges();
+                refreshSSDLabelCache();
+                close();
+                calculateAndDisplay();
+            });
+
+            validate();
+        };
+
+        // =====================================================
+        // === SPR算出パネル：Cycle × Length のBlock数
+        // =====================================================
+        const buildBlockMatrix = (basis) => {
+            const keys = SPR_LIST;
+            const map = {};
+            keys.forEach(k => { map[k] = {}; });
+
+            const lenSet = {};
+            (currentTimeDataList || []).forEach(td => {
+                const k = td.ssdGroup;
+                if (!k || !map[k]) return;
+                const lenKey = (td.blockLength === '' || td.blockLength === undefined || td.blockLength === null)
+                    ? '-' : String(td.blockLength);
+                lenSet[lenKey] = true;
+                const v = basis === 'accepted' ? (td.accepted || 0) : (td.required || 0);
+                map[k][lenKey] = (map[k][lenKey] || 0) + v;
+            });
+
+            const lengths = Object.keys(lenSet).sort((a, b) => {
+                if (a === '-') return 1;
+                if (b === '-') return -1;
+                return Number(b) - Number(a);
+            });
+
+            return { keys, lengths, map };
+        };
+
+        let isApplyingDerivedSpr = false;
+
+        // bodyEl を渡すと未アタッチ状態でも描画できる
+        const renderSprCalcBody = (bodyEl) => {
+            const body = bodyEl || document.getElementById('spr-calc-body');
+            if (!body) return;
+
+            const NAME_W = 72, SUM_W = 54, LEN_W = 54;
+            const panelEl = body.parentElement && body.parentElement.id === 'dsp-spr-calc-panel'
+                ? body.parentElement
+                : document.getElementById('dsp-spr-calc-panel');
+
+            const basis = getSprCalcBasis();
+            const { keys, lengths, map } = buildBlockMatrix(basis);
+
+            if (lengths.length === 0) {
+                body.innerHTML = '<div style="font-size:11px;color:#999;padding:10px 2px;">データなし</div>';
+                if (panelEl) { panelEl.style.width = '300px'; panelEl.style.minWidth = '300px'; }
+                return;
+            }
+
+            const sprMap = getSprCalcLenSpr();
+
+            const cols = 'display:grid;grid-template-columns:' + NAME_W + 'px ' + SUM_W + 'px repeat(' + lengths.length + ',' + LEN_W + 'px);gap:1px;';
+            const cellBase = 'padding:3px 3px;font-size:10px;text-align:right;box-sizing:border-box;';
+            const nameCell = cellBase + 'text-align:left;background:#e3f2fd;font-weight:bold;color:#1565C0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+            const gridWidth = NAME_W + SUM_W + lengths.length * (LEN_W + 1) + 1;
+            const lengthHeader = (bg) => lengths.map(l => '<span style="' + cellBase + 'background:' + bg + ';color:#555;text-align:center;">' + (l === '-' ? '-' : l + 'h') + '</span>').join('');
+            const totalRow = (label, sumText, cellTexts) => '<div style="' + cols + 'margin-top:2px;border-top:2px solid #eee;">' +
+                '<span style="' + cellBase + 'text-align:left;font-weight:bold;color:#333;">' + label + '</span>' +
+                '<span style="' + cellBase + 'font-weight:bold;color:#333;background:#fffde7;">' + sumText + '</span>' +
+                cellTexts.map(t => '<span style="' + cellBase + 'font-weight:bold;color:#666;background:#fffde7;">' + t + '</span>').join('') +
+                '</div>';
+            const formatSigned1 = (v) => (v > 0 ? '+' : '') + v.toFixed(1);
+            const sectionTitleSmall = (text, first) => '<div style="' + (first ? '' : 'margin-top:12px;padding-top:6px;border-top:2px solid #e0f2f1;') + 'font-size:11px;font-weight:bold;color:#00897B;margin-bottom:4px;">' + text + '</div>';
+
+            // ---- 集計（描画前にまとめて計算）----
+            const blockColTotals = {};
+            const blockRowTotals = {};
+            let blockGrandTotal = 0;
+
+            keys.forEach(k => {
+                const row = map[k] || {};
+                let rowTotal = 0;
+                lengths.forEach(l => {
+                    const v = row[l] || 0;
+                    rowTotal += v;
+                    blockColTotals[l] = (blockColTotals[l] || 0) + v;
+                });
+                blockRowTotals[k] = rowTotal;
+                blockGrandTotal += rowTotal;
+            });
+
+            const volMap = {};
+            const volRowTotals = {};
+            const volColTotals = {};
+            let volGrandTotal = 0;
+
+            keys.forEach(k => {
+                const row = map[k] || {};
+                const sprRow = sprMap[k] || {};
+                volMap[k] = {};
+                let rowVol = 0;
+                lengths.forEach(l => {
+                    const vol = (row[l] || 0) * (sprRow[l] || 0);
+                    volMap[k][l] = vol;
+                    rowVol += vol;
+                    volColTotals[l] = (volColTotals[l] || 0) + vol;
+                });
+                volRowTotals[k] = rowVol;
+                volGrandTotal += rowVol;
+            });
+
+            const derivedSprOf = (k) => {
+                const blocks = blockRowTotals[k] || 0;
+                return blocks > 0 ? (volRowTotals[k] || 0) / blocks : 0;
+            };
+
+            let html = '<div style="width:' + gridWidth + 'px;">';
+
+            // ---- SPR設定（Cycle × Length）----
+            const applyOn = getSprCalcApply();
+            html += '<div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:4px;">' +
+                sectionTitleSmall('SPR設定', true) +
+                '<span style="display:flex;align-items:center;gap:4px;">' +
+                '<button id="sprcalc-clear" style="padding:2px 6px;background:#fff;border:1px solid #ccc;border-radius:3px;font-size:9px;color:#666;cursor:pointer;white-space:nowrap;">クリア</button>' +
+                '<button id="sprcalc-apply-toggle" title="算出SPRを左パネルのSPRへ反映"' +
+                ' style="padding:2px 6px;border-radius:3px;font-size:9px;font-weight:bold;cursor:pointer;white-space:nowrap;' +
+                (applyOn
+                    ? 'background:#00897B;border:1px solid #00695C;color:#fff;'
+                    : 'background:#fff;border:1px solid #ccc;color:#999;') +
+                '">SPR反映 ' + (applyOn ? 'ON' : 'OFF') + '</button>' +
+                '</span>' +
+                '</div>';
+            html += '<div style="' + cols + 'font-weight:bold;">' +
+                '<span></span>' +
+                '<span style="' + cellBase + 'background:#fff59d;color:#333;" title="Vol合計 ÷ Block数合計">SPR</span>' +
+                lengthHeader('#fbe9e7') +
+                '</div>';
+
+            keys.forEach(k => {
+                const sprRow = sprMap[k] || {};
+                const spr = derivedSprOf(k);
+
+                html += '<div style="' + cols + 'align-items:center;">' +
+                    '<span style="' + nameCell + '" title="' + escapeHtml(ssdLabel(k)) + '">' + escapeHtml(ssdLabel(k)) + '</span>' +
+                    '<span style="' + cellBase + 'font-weight:bold;background:#fffde7;color:' + (spr > 0 ? '#E64A19' : '#bbb') + ';" title="' + Math.round(volRowTotals[k] || 0) + ' ÷ ' + (blockRowTotals[k] || 0) + '">' + (spr > 0 ? spr.toFixed(1) : '-') + '</span>' +
+                    lengths.map(l => '<input type="number" class="sprcalc-spr-cell" data-k="' + k + '" data-l="' + escapeHtml(l) + '"' +
+                        ' value="' + (sprRow[l] !== undefined ? sprRow[l] : '') + '" step="0.1" min="0" max="9999" placeholder="-"' +
+                        ' style="display:block;width:100%;min-width:0;max-width:100%;height:20px;margin:0;padding:1px 3px;border:none;border-radius:0;box-shadow:none;background:#fffaf7;text-align:right;font-size:10px;font-weight:bold;color:#E64A19;box-sizing:border-box;vertical-align:top;" />').join('') +
+                    '</div>';
+            });
+
+            // ---- Volume / CVP Vol / Vol Gap ----
+            const cvpVol = getCvpVol();
+            const GAP_W = 70;
+            const gapCols = 'display:grid;grid-template-columns:' + NAME_W + 'px ' + SUM_W + 'px repeat(4,' + GAP_W + 'px);gap:1px;';
+
+            html += sectionTitleSmall('Volume / CVP Vol');
+            html += '<div style="' + gapCols + 'font-weight:bold;">' +
+                '<span></span>' +
+                '<span style="' + cellBase + 'background:#fff59d;color:#333;" title="Vol合計 ÷ Block数合計">SPR</span>' +
+                '<span style="' + cellBase + 'background:#fbe9e7;color:#555;" title="Block数合計 × SPR">Volume</span>' +
+                '<span style="' + cellBase + 'background:#fbe9e7;color:#555;" title="参照ファイル 19〜24行目">CVP Vol</span>' +
+                '<span style="' + cellBase + 'background:#fbe9e7;color:#555;" title="Volume − CVP Vol">Vol Gap</span>' +
+                '<span style="' + cellBase + 'background:#fbe9e7;color:#555;" title="Vol Gap ÷ SPR（Block数換算）">Gap/SPR</span>' +
+                '</div>';
+
+            let volumeGrand = 0, cvpVolGrand = 0;
+
+            keys.forEach(k => {
+                const spr = Math.round(derivedSprOf(k) * 10) / 10;
+                const blocks = blockRowTotals[k] || 0;
+                const volume = Math.round(spr * blocks);
+                const cvp = cvpVol[k] || 0;
+                const gap = volume - cvp;
+                volumeGrand += volume;
+                cvpVolGrand += cvp;
+
+                html += '<div style="' + gapCols + '">' +
+                    '<span style="' + nameCell + '" title="' + escapeHtml(ssdLabel(k)) + '">' + escapeHtml(ssdLabel(k)) + '</span>' +
+                    '<span style="' + cellBase + 'font-weight:bold;background:#fffde7;color:' + (spr > 0 ? '#E64A19' : '#bbb') + ';">' + (spr > 0 ? spr.toFixed(1) : '-') + '</span>' +
+                    '<span style="' + cellBase + 'font-weight:bold;color:#333;border:1px solid #eee;" title="' + blocks + ' × ' + spr.toFixed(1) + '">' + volume + '</span>' +
+                    '<span style="' + cellBase + 'color:#333;border:1px solid #eee;">' + (cvp > 0 ? cvp : '-') + '</span>' +
+                    '<span style="' + cellBase + 'font-weight:bold;background:' + (cvp > 0 ? (gap < 0 ? '#ffebee' : '#e8f5e9') : '#fafafa') + ';color:' + (cvp > 0 ? (gap < 0 ? '#c62828' : '#2e7d32') : '#bbb') + ';">' + (cvp > 0 ? (gap > 0 ? '+' + gap : gap) : '-') + '</span>' +
+                    '<span style="' + cellBase + 'background:' + (cvp > 0 && spr > 0 ? (gap < 0 ? '#ffebee' : '#e8f5e9') : '#fafafa') + ';color:' + (cvp > 0 && spr > 0 ? (gap < 0 ? '#c62828' : '#2e7d32') : '#bbb') + ';">' + (cvp > 0 && spr > 0 ? formatSigned1(gap / spr) : '-') + '</span>' +
+                    '</div>';
+            });
+
+            const gapGrand = volumeGrand - cvpVolGrand;
+            html += '<div style="' + gapCols + 'margin-top:2px;border-top:2px solid #eee;">' +
+                '<span style="' + cellBase + 'text-align:left;font-weight:bold;color:#333;">合計</span>' +
+                '<span style="' + cellBase + 'background:#fffde7;">' + (blockGrandTotal > 0 ? (volumeGrand / blockGrandTotal).toFixed(1) : '-') + '</span>' +
+                '<span style="' + cellBase + 'font-weight:bold;color:#333;background:#fffde7;">' + volumeGrand + '</span>' +
+                '<span style="' + cellBase + 'font-weight:bold;color:#333;background:#fffde7;">' + (cvpVolGrand > 0 ? cvpVolGrand : '-') + '</span>' +
+                '<span style="' + cellBase + 'font-weight:bold;background:#fffde7;color:' + (cvpVolGrand > 0 ? (gapGrand < 0 ? '#c62828' : '#2e7d32') : '#bbb') + ';">' + (cvpVolGrand > 0 ? (gapGrand > 0 ? '+' + gapGrand : gapGrand) : '-') + '</span>' +
+                '<span style="' + cellBase + 'background:#fffde7;color:' + (cvpVolGrand > 0 ? (gapGrand < 0 ? '#c62828' : '#2e7d32') : '#bbb') + ';">' + (cvpVolGrand > 0 && volumeGrand > 0 && blockGrandTotal > 0 ? formatSigned1(gapGrand / (volumeGrand / blockGrandTotal)) : '-') + '</span>' +
+                '</div>';
+
+            // ---- Block数 ----
+            html += sectionTitleSmall('Block数');
+            html += '<div style="' + cols + 'font-weight:bold;">' +
+                '<span></span>' +
+                '<span style="' + cellBase + 'background:#f5f5f5;color:#333;">計</span>' +
+                lengthHeader('#f5f5f5') +
+                '</div>';
+
+            keys.forEach(k => {
+                const row = map[k] || {};
+
+                html += '<div style="' + cols + '">' +
+                    '<span style="' + nameCell + '" title="' + escapeHtml(ssdLabel(k)) + '">' + escapeHtml(ssdLabel(k)) + '</span>' +
+                    '<span style="' + cellBase + 'font-weight:bold;color:#333;border:1px solid #eee;">' + (blockRowTotals[k] || 0) + '</span>' +
+                    lengths.map(l => {
+                        const v = row[l] || 0;
+                        return '<span style="' + cellBase + 'background:' + (v > 0 ? '#e8f5e9' : '#fafafa') + ';color:' + (v > 0 ? '#2e7d32' : '#bbb') + ';">' + v + '</span>';
+                    }).join('') +
+                    '</div>';
+            });
+
+            html += totalRow('合計', String(blockGrandTotal), lengths.map(l => String(blockColTotals[l] || 0)));
+
+            // ---- Vol（Block数 × SPR）----
+            html += sectionTitleSmall('Vol（Block数 × SPR）');
+            html += '<div style="' + cols + 'font-weight:bold;">' +
+                '<span></span>' +
+                '<span style="' + cellBase + 'background:#e8eaf6;color:#333;">Vol計</span>' +
+                lengthHeader('#e8eaf6') +
+                '</div>';
+
+            keys.forEach(k => {
+                const volRow = volMap[k] || {};
+
+                html += '<div style="' + cols + '">' +
+                    '<span style="' + nameCell + '" title="' + escapeHtml(ssdLabel(k)) + '">' + escapeHtml(ssdLabel(k)) + '</span>' +
+                    '<span style="' + cellBase + 'font-weight:bold;color:#333;border:1px solid #eee;">' + Math.round(volRowTotals[k] || 0) + '</span>' +
+                    lengths.map(l => {
+                        const vol = volRow[l] || 0;
+                        return '<span style="' + cellBase + 'background:' + (vol > 0 ? '#fff3e0' : '#fafafa') + ';color:' + (vol > 0 ? '#E64A19' : '#bbb') + ';">' + vol.toFixed(1) + '</span>';
+                    }).join('') +
+                    '</div>';
+            });
+
+            html += totalRow('合計', String(Math.round(volGrandTotal)), lengths.map(l => (volColTotals[l] || 0).toFixed(1)));
+
+            html += '</div>';
+
+            body.innerHTML = html;
+
+            // パネル幅を表の幅に合わせる（ヘッダー分の最小幅は確保）
+            if (panelEl) {
+                const w = Math.max(300, gridWidth + 18);
+                panelEl.style.width = w + 'px';
+                panelEl.style.minWidth = w + 'px';
+            }
+
+            // Excelから複数セル貼り付け（TSV）
+            const applyPastedTsv = (text, startKey, startLen) => {
+                const rows = String(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+                while (rows.length && rows[rows.length - 1].trim() === '') rows.pop();
+                if (!rows.length) return false;
+
+                const startKi = keys.indexOf(startKey);
+                const startLi = lengths.indexOf(startLen);
+                if (startKi < 0 || startLi < 0) return false;
+
+                const values = getSprCalcLenSpr();
+                rows.forEach((rowText, ri) => {
+                    const ki = startKi + ri;
+                    if (ki >= keys.length) return;
+                    const k = keys[ki];
+                    if (!values[k]) values[k] = {};
+                    rowText.split('\t').forEach((cellRaw, ci) => {
+                        const li = startLi + ci;
+                        if (li >= lengths.length) return;
+                        const l = lengths[li];
+                        const cleaned = String(cellRaw).replace(/[,\s%]/g, '');
+                        if (cleaned === '' || cleaned === '-') { delete values[k][l]; return; }
+                        const v = Math.max(0, Math.round((Number(cleaned) || 0) * 10) / 10);
+                        if (v > 0) values[k][l] = v; else delete values[k][l];
+                    });
+                });
+                saveSprCalcLenSpr(values);
+                renderSprCalcBody(body);
+                return true;
+            };
+
+            // SPR入力
+            body.querySelectorAll('.sprcalc-spr-cell').forEach(function (el) {
+                el.addEventListener('paste', function (e) {
+                    const cb = e.clipboardData || window.clipboardData;
+                    const text = cb ? cb.getData('text') : '';
+                    if (!text) return;
+                    e.preventDefault();
+                    applyPastedTsv(text, this.getAttribute('data-k'), this.getAttribute('data-l'));
+                });
+
+                el.addEventListener('change', function () {
+                    const k = this.getAttribute('data-k');
+                    const l = this.getAttribute('data-l');
+                    const values = getSprCalcLenSpr();
+                    if (!values[k]) values[k] = {};
+                    const raw = String(this.value).trim();
+                    if (raw === '') {
+                        delete values[k][l];
+                    } else {
+                        const v = Math.max(0, Math.round((Number(raw) || 0) * 10) / 10);
+                        if (v > 0) values[k][l] = v; else delete values[k][l];
+                    }
+                    saveSprCalcLenSpr(values);
+                    renderSprCalcBody(body);
+                });
+            });
+
+            body.querySelector('#sprcalc-clear')?.addEventListener('click', function () {
+                saveSprCalcLenSpr({});
+                renderSprCalcBody(body);
+            });
+
+            body.querySelector('#sprcalc-apply-toggle')?.addEventListener('click', function () {
+                if (getSprCalcApply()) {
+                    // OFF：ON直前の値へ戻す
+                    saveSprCalcApply(false);
+                    restoreMultipliersFromBackup();
+                } else {
+                    // ON：現在値を退避してから反映
+                    saveSprCalcMultBackup(getSSDMultipliers());
+                    saveSprCalcApply(true);
+                }
+                renderSprCalcBody(body);
+            });
+
+            applyDerivedSprToMultipliers();
+        };
+
+        // 算出SPR（Vol合計 ÷ Block数合計）を左パネルのSPRへ反映（0の行は変更しない）
+        const applyDerivedSprToMultipliers = () => {
+            if (!getSprCalcApply() || isApplyingDerivedSpr) return;
+            isApplyingDerivedSpr = true;
+            try {
+                const { keys, lengths, map } = buildBlockMatrix(getSprCalcBasis());
+                const sprMap = getSprCalcLenSpr();
+                const mv = getSSDMultipliers();
+                let changed = false;
+
+                keys.forEach(k => {
+                    const row = map[k] || {};
+                    const sprRow = sprMap[k] || {};
+                    let vol = 0, blocks = 0;
+                    lengths.forEach(l => {
+                        const b = row[l] || 0;
+                        blocks += b;
+                        vol += b * (sprRow[l] || 0);
+                    });
+                    if (blocks <= 0 || vol <= 0) return;
+
+                    const v = Math.round((vol / blocks) * 10) / 10;
+                    if (mv[k] !== v) { mv[k] = v; changed = true; }
+                    const el = document.getElementById('mult-' + k);
+                    if (el) el.value = v.toFixed(1);
+                });
+
+                if (changed) {
+                    saveSSDMultipliers(mv);
+                    refreshCycleValues();
+                }
+            } finally {
+                isApplyingDerivedSpr = false;
+            }
+        };
+
+        const restoreMultipliersFromBackup = () => {
+            const backup = getSprCalcMultBackup();
+            const mv = getSSDMultipliers();
+            SPR_LIST.forEach(k => {
+                const v = Number(backup[k]);
+                mv[k] = Number.isFinite(v) ? v : (mv[k] || 1);
+                const el = document.getElementById('mult-' + k);
+                if (el) el.value = (mv[k] || 0).toFixed(1);
+            });
+            saveSSDMultipliers(mv);
+            refreshCycleValues();
+        };
+
+        // ActSPRシート（1行目: Length見出し / A列: Cycle名）を SPR設定に反映
+        // 戻り値: 反映できたCycle数
+        const applyActSprFromSheetJson = (json) => {
+            if (!json || json.length < 2) return 0;
+
+            const header = json[0] || [];
+            const lenCols = [];
+            for (let c = 1; c < header.length; c++) {
+                const raw = header[c];
+                if (raw === undefined || raw === null || String(raw).trim() === '') continue;
+                const txt = String(raw).trim().replace(/[hH時間]+$/, '');
+                const n = Number(txt);
+                if (Number.isFinite(n) && n > 0) lenCols.push({ col: c, len: String(n) });
+            }
+            if (!lenCols.length) return 0;
+
+            const values = getSprCalcLenSpr();
+            let applied = 0;
+
+            for (let r = 1; r < json.length; r++) {
+                const row = json[r] || [];
+                const key = resolveSSDKey(row[0]);
+                if (!key) continue;
+
+                values[key] = {};
+                lenCols.forEach(lc => {
+                    const raw = row[lc.col];
+                    if (raw === undefined || raw === null) return;
+                    const s = String(raw).replace(/[,\s%]/g, '');
+                    if (s === '' || s === '-') return;
+                    const v = Math.round((Number(s) || 0) * 10) / 10;
+                    if (v > 0) values[key][lc.len] = v;
+                });
+                applied++;
+            }
+
+            if (!applied) return 0;
+            saveSprCalcLenSpr(values);
+            return applied;
+        };
+
+        // =====================================================
         // === 全UI描画
         // =====================================================
         const renderUI = () => {
@@ -1052,7 +1796,7 @@ function newFunction() {
             if (!document.getElementById('dsp-spinner-style')) {
                 const style = document.createElement('style');
                 style.id = 'dsp-spinner-style';
-                style.textContent = 'input[id^="mult-"]::-webkit-inner-spin-button,input[id^="mult-"]::-webkit-outer-spin-button,input[id^="cvp-SSD_"]::-webkit-inner-spin-button,input[id^="cvp-SSD_"]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0;}input[id^="mult-"],input[id^="cvp-SSD_"]{-moz-appearance:textfield;}';
+                style.textContent = 'input[id^="mult-"]::-webkit-inner-spin-button,input[id^="mult-"]::-webkit-outer-spin-button,input[id^="cvp-SSD_"]::-webkit-inner-spin-button,input[id^="cvp-SSD_"]::-webkit-outer-spin-button,.sprcalc-spr-cell::-webkit-inner-spin-button,.sprcalc-spr-cell::-webkit-outer-spin-button{-webkit-appearance:none;margin:0;}input[id^="mult-"],input[id^="cvp-SSD_"],.sprcalc-spr-cell{-moz-appearance:textfield;}.sprcalc-spr-cell{margin:0!important;box-sizing:border-box!important;min-height:0!important;border:none!important;box-shadow:none!important;}.sprcalc-spr-cell:focus{outline:1px solid #FF8A65;outline-offset:-1px;}';
                 document.head.appendChild(style);
             }
 
@@ -1069,7 +1813,7 @@ function newFunction() {
                 const sk2 = SPR_LIST[si];
                 sprInputRows +=
                     '<div style="display:grid;grid-template-columns:54px 1fr 1fr 1fr;gap:4px;align-items:center;margin:4px 0;">' +
-                    '<label style="font-size:11px;color:#555;font-weight:bold;">' + sk2 + '</label>' +
+                    '<label style="font-size:11px;color:#555;font-weight:bold;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(ssdLabel(sk2)) + '">' + escapeHtml(ssdLabel(sk2)) + '</label>' +
                     '<input type="number" id="mult-' + sk2 + '" value="' + (multipliers[sk2] || 1).toFixed(1) + '" step="0.1" min="0" max="100"' +
                     ' style="width:100%;padding:4px;border:1px solid #ccc;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;" />' +
                     '<input type="number" id="adj-' + sk2 + '" value="' + (adjustments[sk2] || 0) + '" step="1" min="-999" max="999"' +
@@ -1100,7 +1844,7 @@ function newFunction() {
 
                 ssdRowsHtml +=
                     '<div style="display:grid;grid-template-columns:80px 60px 70px 70px 70px;gap:6px;margin:3px 0;padding:8px;background:' + (sk === 'SSD_C1' || sk === 'SSD_C3' ? '#f0f8ff' : '#e3f2fd') + ';border-radius:3px;align-items:center;">' +
-                    '<span style="font-weight:bold;font-size:11px;">' + sk + '</span>' +
+                    '<span style="font-weight:bold;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(ssdLabel(sk)) + '">' + escapeHtml(ssdLabel(sk)) + '</span>' +
                     '<span style="color:#FF9800;font-weight:bold;text-align:center;">' + (sk === 'SSD_C1' || sk === 'SSD_C3' ? '-' : d.required) + '</span>' +
                     '<span id="cell-acc-' + sk + '" style="color:#4CAF50;font-weight:bold;text-align:center;">' + (sk === 'SSD_C1' || sk === 'SSD_C3' ? '-' : d.accepted + formatAdjustment(adj)) + '</span>' +
                     '<span id="cell-soft-' + sk + '" style="color:#2196F3;font-weight:bold;text-align:center;">' + soft + '</span>' +
@@ -1185,22 +1929,22 @@ function newFunction() {
             const c1c3InputHtml =
                 '<div style="display:grid;grid-template-columns:60px 1fr 1fr;gap:2px 4px;align-items:center;">' +
                 '<span></span><span style="text-align:center;font-size:9px;color:#9C27B0;font-weight:bold;">CVP</span><span style="text-align:center;font-size:9px;color:#f44336;font-weight:bold;">Buffer</span>' +
-                '<label style="font-size:10px;color:#555;font-weight:bold;text-align:right;">SSD_1</label>' +
+                '<label style="font-size:10px;color:#555;font-weight:bold;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(ssdLabel('SSD_1')) + '">' + escapeHtml(ssdLabel('SSD_1')) + '</label>' +
                 '<input type="number" id="cvp-SSD_C1_1" value="' + valC1_1 + '" step="1" min="0" max="9999"' +
                 ' style="width:100%;padding:4px;border:2px solid #CE93D8;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;color:#9C27B0;font-weight:bold;" />' +
                 '<input type="number" id="cvp-buf-1" value="' + cvpBuf1 + '" step="1" min="-999" max="999"' +
                 ' style="width:100%;padding:4px;border:2px solid #ffcdd2;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;color:#f44336;font-weight:bold;" />' +
-                '<label style="font-size:10px;color:#555;font-weight:bold;text-align:right;">SSD_1_B</label>' +
+                '<label style="font-size:10px;color:#555;font-weight:bold;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(ssdLabel('SSD_1_B')) + '">' + escapeHtml(ssdLabel('SSD_1_B')) + '</label>' +
                 '<input type="number" id="cvp-SSD_C1_1B" value="' + valC1_1B + '" step="1" min="0" max="9999"' +
                 ' style="width:100%;padding:4px;border:2px solid #CE93D8;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;color:#9C27B0;font-weight:bold;" />' +
                 '<input type="number" id="cvp-buf-1b" value="' + cvpBuf1B + '" step="1" min="-999" max="999"' +
                 ' style="width:100%;padding:4px;border:2px solid #ffcdd2;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;color:#f44336;font-weight:bold;" />' +
-                '<label style="font-size:10px;color:#555;font-weight:bold;text-align:right;">SSD_3_B</label>' +
+                '<label style="font-size:10px;color:#555;font-weight:bold;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(ssdLabel('SSD_3_B')) + '">' + escapeHtml(ssdLabel('SSD_3_B')) + '</label>' +
                 '<input type="number" id="cvp-SSD_C3_3B" value="' + valC3_3B + '" step="1" min="0" max="9999"' +
                 ' style="width:100%;padding:4px;border:2px solid #CE93D8;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;color:#9C27B0;font-weight:bold;" />' +
                 '<input type="number" id="cvp-buf-3b" value="' + cvpBuf3B + '" step="1" min="-999" max="999"' +
                 ' style="width:100%;padding:4px;border:2px solid #ffcdd2;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;color:#f44336;font-weight:bold;" />' +
-                '<label style="font-size:10px;color:#555;font-weight:bold;text-align:right;">SSD_4</label>' +
+                '<label style="font-size:10px;color:#555;font-weight:bold;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(ssdLabel('SSD_4')) + '">' + escapeHtml(ssdLabel('SSD_4')) + '</label>' +
                 '<input type="number" id="cvp-SSD_C3_4" value="' + valC3_4 + '" step="1" min="0" max="9999"' +
                 ' style="width:100%;padding:4px;border:2px solid #CE93D8;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;color:#9C27B0;font-weight:bold;" />' +
                 '<input type="number" id="cvp-buf-4" value="' + cvpBuf4 + '" step="1" min="-999" max="999"' +
@@ -1234,16 +1978,17 @@ function newFunction() {
                 c1c3InputHtml +
                 '</div>' +
                 '<div style="margin-top:8px;padding-top:4px;border-top:2px solid #e3f2fd;">' +
-                '<div style="display:flex;align-items:center;gap:12px;justify-content:space-between;">' +
-                '<div>' +
+                '<div style="display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:end;">' +
+                '<button id="spr-calc-btn" style="height:31px;padding:0 4px;background:#00897B;color:white;border:none;border-radius:4px;cursor:pointer;font-size:11px;font-weight:bold;box-sizing:border-box;line-height:1;white-space:nowrap;">SPR算出</button>' +
+                '<div style="text-align:left;">' +
                 '<div style="font-weight:bold;color:#2196F3;font-size:13px;margin-bottom:6px;">全Soft調整</div>' +
                 '<div style="display:flex;align-items:center;gap:6px;">' +
                 '<input type="number" id="soft-pct-input" value="' + pct + '" step="1" min="-100" max="200"' +
-                ' style="width:80px;padding:5px;border:2px solid #2196F3;border-radius:4px;text-align:center;font-size:14px;font-weight:bold;box-sizing:border-box;" />' +
+                ' style="width:60px;padding:5px;border:2px solid #2196F3;border-radius:4px;text-align:center;font-size:14px;font-weight:bold;box-sizing:border-box;" />' +
                 '<span style="font-size:14px;font-weight:bold;color:#555;">%</span>' +
                 '</div>' +
                 '</div>' +
-                '<div>' +
+                '<div style="text-align:left;">' +
                 '<div style="font-weight:bold;color:#9C27B0;font-size:13px;margin-bottom:6px;">Hard調整</div>' +
                 '<div style="display:flex;align-items:center;gap:6px;">' +
                 '<input type="number" id="hard-pct-input" value="' + getHardPct() + '" step="1" min="0" max="500"' +
@@ -1296,9 +2041,55 @@ function newFunction() {
                 '</div>' +
                 timeRowsHtml;
 
+            // SPR算出パネル（左パネルの左側 / 算出ロジックは今後実装）
+            const sprCalcPanel = document.createElement('div');
+            sprCalcPanel.id = 'dsp-spr-calc-panel';
+            const sprBasis = getSprCalcBasis();
+            // width は renderSprCalcBody() が表の幅に合わせて上書きする
+            sprCalcPanel.style.cssText = 'width:600px;min-width:600px;padding:6px 8px;border-right:2px solid #e3f2fd;max-height:600px;overflow-y:auto;overflow-x:hidden;box-sizing:border-box;';
+            sprCalcPanel.innerHTML =
+                '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;padding-bottom:4px;border-bottom:2px solid #e0f2f1;">' +
+                '<span style="font-weight:bold;color:#00897B;font-size:13px;">SPR算出</span>' +
+                '<div style="display:flex;align-items:center;gap:8px;">' +
+                '<label style="font-size:10px;color:#555;cursor:pointer;white-space:nowrap;"><input type="radio" name="spr-calc-basis" value="required"' + (sprBasis === 'required' ? ' checked' : '') + ' style="vertical-align:middle;margin:0 2px 0 0;" />必須</label>' +
+                '<label style="font-size:10px;color:#555;cursor:pointer;white-space:nowrap;"><input type="radio" name="spr-calc-basis" value="accepted"' + (sprBasis === 'accepted' ? ' checked' : '') + ' style="vertical-align:middle;margin:0 2px 0 0;" />受諾</label>' +
+                '<button id="spr-calc-close" style="background:none;border:none;font-size:16px;color:#999;cursor:pointer;line-height:1;padding:0 2px;">×</button>' +
+                '</div>' +
+                '</div>' +
+                '<div id="spr-calc-body"></div>';
+
+            box.appendChild(sprCalcPanel);
             box.appendChild(leftPanel);
             box.appendChild(midPanel);
             box.appendChild(rightPanel);
+
+            const sprCalcBody = sprCalcPanel.querySelector('#spr-calc-body');
+
+            let sprCalcOpen = getSprCalcPanelOpen();
+            const applySprCalcVisibility = () => { sprCalcPanel.style.display = sprCalcOpen ? '' : 'none'; };
+            applySprCalcVisibility();
+
+            const setSprCalcOpen = (open) => {
+                sprCalcOpen = !!open;
+                saveSprCalcPanelOpen(sprCalcOpen);
+                applySprCalcVisibility();
+            };
+
+            leftPanel.querySelector('#spr-calc-btn')?.addEventListener('click', function () {
+                setSprCalcOpen(!sprCalcOpen);
+            });
+            sprCalcPanel.querySelector('#spr-calc-close')?.addEventListener('click', function () {
+                setSprCalcOpen(false);
+            });
+            sprCalcPanel.querySelectorAll('input[name="spr-calc-basis"]').forEach(function (radio) {
+                radio.addEventListener('change', function () {
+                    if (!this.checked) return;
+                    saveSprCalcBasis(this.value);
+                    renderSprCalcBody(sprCalcBody);
+                });
+            });
+
+            renderSprCalcBody(sprCalcBody);
 
             // 右上に全体表示/非表示ボタン
             const toggleBtn = document.createElement('button');
@@ -1315,10 +2106,20 @@ function newFunction() {
             versionLabel.style.cssText = 'position:absolute;top:7px;right:28px;font-size:10px;color:#bbb;font-weight:bold;line-height:1;z-index:1;pointer-events:none;';
             box.appendChild(versionLabel);
 
+            // バージョン表示の左隣に設定ボタン
+            const settingsBtn = document.createElement('button');
+            settingsBtn.id = 'dsp-settings-btn';
+            settingsBtn.textContent = 'Cycle設定';
+            settingsBtn.title = 'Cycle名称・時間帯の設定';
+            settingsBtn.style.cssText = 'position:absolute;top:3px;right:62px;padding:2px 6px;background:#f1f8e9;border:1px solid #a5d6a7;border-radius:4px;font-size:10px;font-weight:bold;cursor:pointer;color:#2e7d32;line-height:1.3;white-space:nowrap;z-index:2;';
+            settingsBtn.addEventListener('click', function (e) { e.stopPropagation(); openTimeRangeSettings(); });
+            box.appendChild(settingsBtn);
+
             document.body.appendChild(box);
 
             var isHidden = false;
             var hideUI = function () {
+                sprCalcPanel.style.display = 'none';
                 leftPanel.style.display = 'none';
                 midPanel.style.display = 'none';
                 rightPanel.style.display = 'none';
@@ -1336,9 +2137,11 @@ function newFunction() {
                 toggleBtn.style.border = '1px solid #4CAF50';
                 toggleBtn.style.whiteSpace = 'nowrap';
                 versionLabel.style.display = 'none';
+                settingsBtn.style.display = 'none';
                 isHidden = true;
             };
             var showUI = function () {
+                applySprCalcVisibility();
                 leftPanel.style.display = '';
                 midPanel.style.display = '';
                 rightPanel.style.display = '';
@@ -1356,6 +2159,7 @@ function newFunction() {
                 toggleBtn.style.border = 'none';
                 toggleBtn.style.whiteSpace = '';
                 versionLabel.style.display = '';
+                settingsBtn.style.display = '';
                 isHidden = false;
             };
             toggleBtn.addEventListener('click', function () {
@@ -1367,6 +2171,8 @@ function newFunction() {
                 if (h > 0) {
                     rightPanel.style.height = h + 'px';
                     rightPanel.style.maxHeight = h + 'px';
+                    sprCalcPanel.style.height = h + 'px';
+                    sprCalcPanel.style.maxHeight = h + 'px';
                 }
             }, 0);
 
@@ -1405,6 +2211,8 @@ function newFunction() {
                 }
             });
 
+            var actSprMessage = '';
+
             var processSPRExcelData = function (data, showAlert) {
                 try {
                     var arr = new Uint8Array(data);
@@ -1417,6 +2225,23 @@ function newFunction() {
                     }
                     // キャッシュに保存
                     try { localStorage.setItem('dsp-spr-excel-cache', JSON.stringify(json)); } catch (e2) { }
+
+                    // ActSPRシート → SPR設定（Lengthごと）
+                    actSprMessage = '';
+                    var actName = null;
+                    for (var si = 0; si < wb.SheetNames.length; si++) {
+                        if (String(wb.SheetNames[si]).trim().toLowerCase() === 'actspr') { actName = wb.SheetNames[si]; break; }
+                    }
+                    if (actName) {
+                        var actJson = XLSX.utils.sheet_to_json(wb.Sheets[actName], { header: 1 });
+                        var applied = applyActSprFromSheetJson(actJson);
+                        actSprMessage = applied > 0
+                            ? '\nActSPR: ' + applied + ' Cycle分のSPRを反映しました。'
+                            : '\nActSPRシートから値を読み取れませんでした。';
+                        renderSprCalcBody();
+                    } else {
+                        actSprMessage = '\nActSPRシートが見つかりませんでした。';
+                    }
 
                     applySPRFromJson(json, showAlert);
                 } catch (err) {
@@ -1470,7 +2295,9 @@ function newFunction() {
                     ov0['SSD_C1'] = 0;
                     ov0['SSD_C3'] = 0;
                     saveC1C3Overrides(ov0);
+                    saveCvpVol(Object.assign({}, CVP_VOL_DEFAULTS));
                     refreshCycleValues();
+                    renderSprCalcBody();
                     if (showAlert) alert('該当日付の列が見つかりません（' + md.month + '月' + md.day + '日）。SPR/CVPを0に設定しました。');
                     return;
                 }
@@ -1485,6 +2312,8 @@ function newFunction() {
                     }
                 }
                 saveSSDMultipliers(mv);
+                // 反映ONのときは「ファイルの値」を復元用として保持し、その上で算出SPRを反映
+                if (getSprCalcApply()) saveSprCalcMultBackup(mv);
 
                 // 11〜16行目: CVP値をc1c3 overridesに反映
                 // 行11=SSD_1→SSD_C1_1, 行12=SSD_1_B→SSD_C1_1B, 行15=SSD_3_B→SSD_C3_3B, 行16=SSD_4→SSD_C3_4
@@ -1509,8 +2338,20 @@ function newFunction() {
                 ov['SSD_C3'] = (ov['SSD_C3_3B'] || 0) + (ov['SSD_C3_4'] || 0);
                 saveC1C3Overrides(ov);
 
+                // 19〜24行目: CVP Vol（SPR算出パネルのVol Gap用）
+                var cv = {};
+                for (var vi = 0; vi < SPR_LIST.length; vi++) {
+                    var vrow = json[18 + vi];
+                    var vval = vrow ? vrow[colIdx] : null;
+                    var vnum = (vval !== undefined && vval !== null && vval !== '') ? Math.round(Number(vval)) : 0;
+                    cv[SPR_LIST[vi]] = Number.isFinite(vnum) && vnum > 0 ? vnum : 0;
+                }
+                saveCvpVol(cv);
+
                 refreshCycleValues();
-                if (showAlert) alert('SPR/CVPを反映しました。');
+                renderSprCalcBody();
+                applyDerivedSprToMultipliers();
+                if (showAlert) alert('SPR/CVPを反映しました。' + actSprMessage);
             };
 
             // 日付変更時にキャッシュからSPR自動反映
@@ -1523,6 +2364,7 @@ function newFunction() {
                 } catch (e3) { }
             };
             applySPRFromCache();
+            applyDerivedSprToMultipliers();
 
             document.getElementById('spr-file-btn')?.addEventListener('click', function () {
                 document.getElementById('spr-file-input')?.click();
