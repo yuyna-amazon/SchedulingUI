@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      16.0
+// @version      16.1
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -355,9 +355,27 @@ function newFunction() {
             return out;
         };
         const saveCvpVol = (v) => setStorage('dsp-cvp-vol', v);
+        // ActSPRシートのSPR列（J列相当）の値
+        const ACT_SPR_TOTAL_DEFAULTS = {};
+        SPR_LIST.forEach(k => { ACT_SPR_TOTAL_DEFAULTS[k] = 0; });
+        const getActSprTotal = () => {
+            const stored = getStorage('dsp-act-spr-total', ACT_SPR_TOTAL_DEFAULTS);
+            const out = {};
+            SPR_LIST.forEach(k => {
+                const v = Number(stored && stored[k]);
+                out[k] = Number.isFinite(v) && v > 0 ? v : 0;
+            });
+            return out;
+        };
+        const saveActSprTotal = (v) => setStorage('dsp-act-spr-total', v);
         // 算出SPRを左パネルのSPR（倍率）へ反映するか
         const getSprCalcApply = () => getStorage('dsp-spr-calc-apply', false);
         const saveSprCalcApply = (v) => setStorage('dsp-spr-calc-apply', !!v);
+        // SPR設定テーブルの表示/非表示
+        const getSprCalcShowSetting = () => getStorage('dsp-spr-calc-show-setting', true);
+        const saveSprCalcShowSetting = (v) => setStorage('dsp-spr-calc-show-setting', !!v);
+        const sprSmallBtnStyle = (on) => 'padding:2px 6px;border-radius:3px;font-size:9px;font-weight:bold;cursor:pointer;white-space:nowrap;' +
+            (on ? 'background:#00897B;border:1px solid #00695C;color:#fff;' : 'background:#fff;border:1px solid #ccc;color:#999;');
         // ON にする直前のSPR（OFF で復元する）
         const getSprCalcMultBackup = () => getStorage('dsp-spr-calc-mult-backup', SSD_DEFAULTS);
         const saveSprCalcMultBackup = (v) => setStorage('dsp-spr-calc-mult-backup', v);
@@ -1435,7 +1453,12 @@ function newFunction() {
                 cellTexts.map(t => '<span style="' + cellBase + 'font-weight:bold;color:#666;background:#fffde7;">' + t + '</span>').join('') +
                 '</div>';
             const formatSigned1 = (v) => (v > 0 ? '+' : '') + v.toFixed(1);
-            const sectionTitleSmall = (text, first) => '<div style="' + (first ? '' : 'margin-top:12px;padding-top:6px;border-top:2px solid #e0f2f1;') + 'font-size:11px;font-weight:bold;color:#00897B;margin-bottom:4px;">' + text + '</div>';
+            const sectionHeader = (title, rightHtml, first) => '<div style="' +
+                (first ? '' : 'margin-top:12px;padding-top:6px;border-top:2px solid #e0f2f1;') +
+                'display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:4px;">' +
+                '<span style="font-size:11px;font-weight:bold;color:#00897B;">' + title + '</span>' +
+                '<span style="display:flex;align-items:center;gap:4px;">' + (rightHtml || '') + '</span>' +
+                '</div>';
 
             // ---- 集計（描画前にまとめて計算）----
             const blockColTotals = {};
@@ -1482,44 +1505,43 @@ function newFunction() {
             let html = '<div style="width:' + gridWidth + 'px;">';
 
             // ---- SPR設定（Cycle × Length）----
-            const applyOn = getSprCalcApply();
-            html += '<div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:4px;">' +
-                sectionTitleSmall('SPR設定', true) +
-                '<span style="display:flex;align-items:center;gap:4px;">' +
-                '<button id="sprcalc-clear" style="padding:2px 6px;background:#fff;border:1px solid #ccc;border-radius:3px;font-size:9px;color:#666;cursor:pointer;white-space:nowrap;">クリア</button>' +
-                '<button id="sprcalc-apply-toggle" title="算出SPRを左パネルのSPRへ反映"' +
-                ' style="padding:2px 6px;border-radius:3px;font-size:9px;font-weight:bold;cursor:pointer;white-space:nowrap;' +
-                (applyOn
-                    ? 'background:#00897B;border:1px solid #00695C;color:#fff;'
-                    : 'background:#fff;border:1px solid #ccc;color:#999;') +
-                '">SPR反映 ' + (applyOn ? 'ON' : 'OFF') + '</button>' +
-                '</span>' +
-                '</div>';
-            html += '<div style="' + cols + 'font-weight:bold;">' +
-                '<span></span>' +
-                '<span style="' + cellBase + 'background:#fff59d;color:#333;" title="Vol合計 ÷ Block数合計">SPR</span>' +
-                lengthHeader('#fbe9e7') +
-                '</div>';
+            const showSetting = getSprCalcShowSetting();
 
-            keys.forEach(k => {
-                const sprRow = sprMap[k] || {};
-                const spr = derivedSprOf(k);
+            if (showSetting) {
+                html += sectionHeader('SPR設定',
+                    '<button id="sprcalc-clear" style="padding:2px 6px;background:#fff;border:1px solid #ccc;border-radius:3px;font-size:9px;color:#666;cursor:pointer;white-space:nowrap;">クリア</button>',
+                    true);
+                const actSprTotal = getActSprTotal();
 
-                html += '<div style="' + cols + 'align-items:center;">' +
-                    '<span style="' + nameCell + '" title="' + escapeHtml(ssdLabel(k)) + '">' + escapeHtml(ssdLabel(k)) + '</span>' +
-                    '<span style="' + cellBase + 'font-weight:bold;background:#fffde7;color:' + (spr > 0 ? '#E64A19' : '#bbb') + ';" title="' + Math.round(volRowTotals[k] || 0) + ' ÷ ' + (blockRowTotals[k] || 0) + '">' + (spr > 0 ? spr.toFixed(1) : '-') + '</span>' +
-                    lengths.map(l => '<input type="number" class="sprcalc-spr-cell" data-k="' + k + '" data-l="' + escapeHtml(l) + '"' +
+                html += '<div style="' + cols + 'font-weight:bold;">' +
+                    '<span></span>' +
+                    '<span style="' + cellBase + 'background:#fff59d;color:#333;" title="参照ファイル ActSPRシートのSPR列">SPR</span>' +
+                    lengthHeader('#fbe9e7') +
+                    '</div>';
+
+                keys.forEach(k => {
+                    const sprRow = sprMap[k] || {};
+                    const actTotal = actSprTotal[k] || 0;
+
+                    html += '<div style="' + cols + 'align-items:center;">' +
+                        '<span style="' + nameCell + '" title="' + escapeHtml(ssdLabel(k)) + '">' + escapeHtml(ssdLabel(k)) + '</span>' +
+                        '<span style="' + cellBase + 'font-weight:bold;background:#fffde7;color:' + (actTotal > 0 ? '#E64A19' : '#bbb') + ';">' + (actTotal > 0 ? actTotal.toFixed(1) : '-') + '</span>' +
+                        lengths.map(l => '<input type="number" class="sprcalc-spr-cell" data-k="' + k + '" data-l="' + escapeHtml(l) + '"' +
                         ' value="' + (sprRow[l] !== undefined ? sprRow[l] : '') + '" step="0.1" min="0" max="9999" placeholder="-"' +
                         ' style="display:block;width:100%;min-width:0;max-width:100%;height:20px;margin:0;padding:1px 3px;border:none;border-radius:0;box-shadow:none;background:#fffaf7;text-align:right;font-size:10px;font-weight:bold;color:#E64A19;box-sizing:border-box;vertical-align:top;" />').join('') +
-                    '</div>';
-            });
+                        '</div>';
+                });
+            }
 
             // ---- Volume / CVP Vol / Vol Gap ----
             const cvpVol = getCvpVol();
+            const applyOn = getSprCalcApply();
             const GAP_W = 70;
             const gapCols = 'display:grid;grid-template-columns:' + NAME_W + 'px ' + SUM_W + 'px repeat(4,' + GAP_W + 'px);gap:1px;';
 
-            html += sectionTitleSmall('Volume / CVP Vol');
+            html += sectionHeader('Volume / CVP Vol',
+                '<button id="sprcalc-apply-toggle" title="算出SPRを左パネルのSPRへ反映" style="' + sprSmallBtnStyle(applyOn) + '">SPR反映 ' + (applyOn ? 'ON' : 'OFF') + '</button>',
+                !showSetting);
             html += '<div style="' + gapCols + 'font-weight:bold;">' +
                 '<span></span>' +
                 '<span style="' + cellBase + 'background:#fff59d;color:#333;" title="Vol合計 ÷ Block数合計">SPR</span>' +
@@ -1561,7 +1583,7 @@ function newFunction() {
                 '</div>';
 
             // ---- Block数 ----
-            html += sectionTitleSmall('Block数');
+            html += sectionHeader('Block数');
             html += '<div style="' + cols + 'font-weight:bold;">' +
                 '<span></span>' +
                 '<span style="' + cellBase + 'background:#f5f5f5;color:#333;">計</span>' +
@@ -1584,7 +1606,7 @@ function newFunction() {
             html += totalRow('合計', String(blockGrandTotal), lengths.map(l => String(blockColTotals[l] || 0)));
 
             // ---- Vol（Block数 × SPR）----
-            html += sectionTitleSmall('Vol（Block数 × SPR）');
+            html += sectionHeader('Vol（Block数 × SPR）');
             html += '<div style="' + cols + 'font-weight:bold;">' +
                 '<span></span>' +
                 '<span style="' + cellBase + 'background:#e8eaf6;color:#333;">Vol計</span>' +
@@ -1752,16 +1774,20 @@ function newFunction() {
 
             const header = json[0] || [];
             const lenCols = [];
+            let sprCol = -1;
             for (let c = 1; c < header.length; c++) {
                 const raw = header[c];
                 if (raw === undefined || raw === null || String(raw).trim() === '') continue;
-                const txt = String(raw).trim().replace(/[hH時間]+$/, '');
-                const n = Number(txt);
+                const label = String(raw).trim();
+                if (label.toLowerCase() === 'spr') { sprCol = c; continue; }
+                const n = Number(label.replace(/[hH時間]+$/, ''));
                 if (Number.isFinite(n) && n > 0) lenCols.push({ col: c, len: String(n) });
             }
             if (!lenCols.length) return 0;
+            if (sprCol < 0) sprCol = 9; // J列
 
             const values = getSprCalcLenSpr();
+            const totals = getActSprTotal();
             let applied = 0;
 
             for (let r = 1; r < json.length; r++) {
@@ -1778,11 +1804,19 @@ function newFunction() {
                     const v = Math.round((Number(s) || 0) * 10) / 10;
                     if (v > 0) values[key][lc.len] = v;
                 });
+
+                // SPR列（J列相当）
+                const totalRaw = row[sprCol];
+                const totalStr = (totalRaw === undefined || totalRaw === null) ? '' : String(totalRaw).replace(/[,\s%]/g, '');
+                const totalNum = (totalStr === '' || totalStr === '-') ? 0 : Math.round((Number(totalStr) || 0) * 10) / 10;
+                totals[key] = totalNum > 0 ? totalNum : 0;
+
                 applied++;
             }
 
             if (!applied) return 0;
             saveSprCalcLenSpr(values);
+            saveActSprTotal(totals);
             return applied;
         };
 
@@ -2051,6 +2085,7 @@ function newFunction() {
                 '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;padding-bottom:4px;border-bottom:2px solid #e0f2f1;">' +
                 '<span style="font-weight:bold;color:#00897B;font-size:13px;">SPR算出</span>' +
                 '<div style="display:flex;align-items:center;gap:8px;">' +
+                '<button id="spr-calc-setting-btn" title="SPR設定の表示/非表示" style="' + sprSmallBtnStyle(getSprCalcShowSetting()) + '">SPR設定</button>' +
                 '<label style="font-size:10px;color:#555;cursor:pointer;white-space:nowrap;"><input type="radio" name="spr-calc-basis" value="required"' + (sprBasis === 'required' ? ' checked' : '') + ' style="vertical-align:middle;margin:0 2px 0 0;" />必須</label>' +
                 '<label style="font-size:10px;color:#555;cursor:pointer;white-space:nowrap;"><input type="radio" name="spr-calc-basis" value="accepted"' + (sprBasis === 'accepted' ? ' checked' : '') + ' style="vertical-align:middle;margin:0 2px 0 0;" />受諾</label>' +
                 '<button id="spr-calc-close" style="background:none;border:none;font-size:16px;color:#999;cursor:pointer;line-height:1;padding:0 2px;">×</button>' +
@@ -2080,6 +2115,12 @@ function newFunction() {
             });
             sprCalcPanel.querySelector('#spr-calc-close')?.addEventListener('click', function () {
                 setSprCalcOpen(false);
+            });
+            sprCalcPanel.querySelector('#spr-calc-setting-btn')?.addEventListener('click', function () {
+                const next = !getSprCalcShowSetting();
+                saveSprCalcShowSetting(next);
+                this.style.cssText = sprSmallBtnStyle(next);
+                renderSprCalcBody(sprCalcBody);
             });
             sprCalcPanel.querySelectorAll('input[name="spr-calc-basis"]').forEach(function (radio) {
                 radio.addEventListener('change', function () {
