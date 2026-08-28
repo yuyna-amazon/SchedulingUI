@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      16.2
+// @version      16.3
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -36,6 +36,11 @@ function newFunction() {
         let cachedTable = null;
         let isFutureRequiredDownloading = false;
         let lastCalculatedTime = '';
+        // 再描画の抑止・遅延用
+        let lastRenderSignature = '';
+        let sprFileDialogOpen = false;
+        let sprFileProcessor = null;
+        let deferredRenderCount = 0;
 
         // === プリコンパイル正規表現 ===
         const TIME_REGEX = /(\d+):(\d+)\s*(午前|午後|am|pm)/i;
@@ -697,8 +702,26 @@ function newFunction() {
         // =====================================================
         // === テーブルからデータ読み取り → 全UI再構築
         // =====================================================
+        // パネル内の入力中は再描画しない（入力値・フォーカスが失われるのを防ぐ）
+        const isEditingPanel = () => {
+            const ae = document.activeElement;
+            if (!ae || !ae.closest) return false;
+            const tag = ae.tagName;
+            if (tag !== 'INPUT' && tag !== 'SELECT' && tag !== 'TEXTAREA') return false;
+            return !!ae.closest('#dsp-main-box');
+        };
+
         const calculateAndDisplay = () => {
             if (isCalculating) return;
+
+            // ファイル選択ダイアログ中・入力中は後回し（最大20回まで）
+            if ((sprFileDialogOpen || isEditingPanel()) && deferredRenderCount < 20) {
+                deferredRenderCount++;
+                debouncedCalculate(1000);
+                return;
+            }
+            deferredRenderCount = 0;
+
             isCalculating = true;
 
             try {
@@ -802,6 +825,21 @@ function newFunction() {
                 const now = new Date();
                 lastCalculatedTime = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0') + ':' + String(now.getSeconds()).padStart(2, '0');
 
+                // 内容が前回と同じなら再描画しない（クリックやフォーカスが失われるのを防ぐ）
+                const signature = JSON.stringify({
+                    d: getSelectedDateText(),
+                    s: ssdData,
+                    t: timeDataList.map(td => [td.timeMinutes, td.serviceType, td.blockLength, td.required, td.accepted]),
+                    o: currentTotals
+                });
+
+                if (signature === lastRenderSignature && document.getElementById('dsp-main-box')) {
+                    const timeEl = document.getElementById('dsp-last-calc-time');
+                    if (timeEl) timeEl.textContent = lastCalculatedTime;
+                    return;
+                }
+
+                lastRenderSignature = signature;
                 renderUI();
             } finally {
                 isCalculating = false;
@@ -894,6 +932,35 @@ function newFunction() {
                 input3B.max = String(max3B);
                 input3B.title = 'Max: ' + max3B + '（受諾×SPR）';
             }
+        };
+
+        // === SPR/CVP参照用のファイル入力（パネル再描画で消えないよう body 直下に1つだけ保持）===
+        const getSprFileInput = () => {
+            let input = document.getElementById('dsp-spr-file-input');
+            if (input) return input;
+
+            input = document.createElement('input');
+            input.type = 'file';
+            input.id = 'dsp-spr-file-input';
+            input.accept = '.xlsx,.xls';
+            input.style.display = 'none';
+
+            input.addEventListener('change', function () {
+                const file = this.files && this.files[0];
+                this.value = '';
+                sprFileDialogOpen = false;
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = function (ev) {
+                    if (typeof sprFileProcessor === 'function') sprFileProcessor(ev.target.result, true);
+                };
+                reader.readAsArrayBuffer(file);
+            });
+            // ダイアログをキャンセルした場合
+            input.addEventListener('cancel', function () { sprFileDialogOpen = false; });
+
+            document.body.appendChild(input);
+            return input;
         };
 
         // === debounce ===
@@ -1997,7 +2064,7 @@ function newFunction() {
             leftPanel.innerHTML =
                 '<div style="display:flex;align-items:baseline;justify-content:center;gap:8px;margin-bottom:4px;padding-bottom:4px;border-bottom:2px solid #e3f2fd;">' +
                 '<span style="font-size:18px;font-weight:bold;color:#333;">' + formatSelectedDateLabel() + '</span>' +
-                '<span style="font-size:11px;color:#999;">' + lastCalculatedTime + '</span>' +
+                '<span id="dsp-last-calc-time" style="font-size:11px;color:#999;">' + lastCalculatedTime + '</span>' +
                 '</div>' +
                 '<div style="display:grid;grid-template-columns:54px 1fr 1fr 1fr;gap:4px;margin-bottom:6px;padding:0 2px;font-size:12px;color:#999;font-weight:bold;">' +
                 '<span></span><span style="text-align:center;">SPR</span><span style="text-align:center;color:#f44336;">Buffer</span><span style="text-align:center;color:#2196F3;">Adjust</span>' +
@@ -2008,7 +2075,7 @@ function newFunction() {
                 '<button id="adj-reset-btn" style="width:100%;height:24px;padding:0 2px;background:#ff8a80;color:white;border:none;border-radius:4px;cursor:pointer;font-size:8px;font-weight:bold;box-sizing:border-box;line-height:11px;display:flex;align-items:center;justify-content:center;text-align:center;">Buffer<br>リセット</button>' +
                 '<button id="soft-adj-reset-btn" style="width:100%;height:24px;padding:0 2px;background:#64b5f6;color:white;border:none;border-radius:4px;cursor:pointer;font-size:8px;font-weight:bold;box-sizing:border-box;line-height:11px;display:flex;align-items:center;justify-content:center;text-align:center;">Adjust<br>リセット</button>' +
                 '</div>' +
-                '<input type="file" id="spr-file-input" accept=".xlsx,.xls" style="display:none;" />' +
+
                 '<div style="margin-top:8px;padding-top:4px;border-top:2px solid #e3f2fd;">' +
                 c1c3InputHtml +
                 '</div>' +
@@ -2408,19 +2475,12 @@ function newFunction() {
             applySPRFromCache();
             applyDerivedSprToMultipliers();
 
-            document.getElementById('spr-file-btn')?.addEventListener('click', function () {
-                document.getElementById('spr-file-input')?.click();
-            });
+            // 最新の処理関数を永続ファイル入力へ渡す
+            sprFileProcessor = processSPRExcelData;
 
-            document.getElementById('spr-file-input')?.addEventListener('change', function (e) {
-                var file = e.target.files[0];
-                if (!file) return;
-                var reader = new FileReader();
-                reader.onload = function (ev) {
-                    processSPRExcelData(ev.target.result, true);
-                };
-                reader.readAsArrayBuffer(file);
-                this.value = '';
+            document.getElementById('spr-file-btn')?.addEventListener('click', function () {
+                sprFileDialogOpen = true;
+                getSprFileInput().click();
             });
 
             document.getElementById('adj-reset-btn')?.addEventListener('click', function () {
@@ -2568,10 +2628,15 @@ function newFunction() {
 
         // === 初期化 ===
         const init = () => {
+            // ファイルダイアログのフラグが残らないようにする保険
+            window.addEventListener('focus', function () {
+                setTimeout(function () { sprFileDialogOpen = false; }, 300);
+            });
+
             setTimeout(() => {
                 calculateAndDisplay();
                 startObserver();
-                console.log('[DSP Counter v12.1] 起動完了');
+                console.log('[SchedulingUI v' + SCRIPT_VERSION + '] 起動完了');
             }, 1000);
         };
 
