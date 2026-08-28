@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      16.4
+// @version      16.5
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -1673,6 +1673,17 @@ function newFunction() {
             });
 
             html += totalRow('合計', String(blockGrandTotal), lengths.map(l => String(blockColTotals[l] || 0)));
+
+            // Length別の構成比
+            html += '<div style="' + cols + '">' +
+                '<span style="' + cellBase + 'text-align:left;font-weight:bold;color:#666;">Ratio</span>' +
+                '<span style="' + cellBase + 'color:#666;background:#f5f5f5;">' + (blockGrandTotal > 0 ? '100.0%' : '-') + '</span>' +
+                lengths.map(l => {
+                    const v = blockColTotals[l] || 0;
+                    const ratio = blockGrandTotal > 0 ? (v / blockGrandTotal * 100) : 0;
+                    return '<span style="' + cellBase + 'background:#f5f5f5;color:' + (v > 0 ? '#666' : '#bbb') + ';">' + (blockGrandTotal > 0 ? ratio.toFixed(1) + '%' : '-') + '</span>';
+                }).join('') +
+                '</div>';
 
             // ---- Vol（Block数 × SPR）----
             html += sectionHeader('Vol（Block数 × SPR）');
