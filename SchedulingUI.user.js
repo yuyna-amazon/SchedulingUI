@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      16.1
+// @version      16.2
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -951,7 +951,8 @@ function newFunction() {
 
             const wsData = [['Station', 'Cycle', 'Soft Caps', 'Hard Caps']];
 
-            for (const ssd of SSD_LIST) {
+            // SSD_C1 / SSD_C3 は出力しない
+            for (const ssd of SPR_LIST) {
                 const d = currentSSDData[ssd];
                 const m = getCycleMultiplier(ssd, multipliers);
                 const adj = adjustments[ssd] || 0;
