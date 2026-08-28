@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      16.3
+// @version      16.4
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -37,6 +37,7 @@ function newFunction() {
         let isFutureRequiredDownloading = false;
         let lastCalculatedTime = '';
         // 再描画の抑止・遅延用
+        let isRenderingUI = false;
         let lastRenderSignature = '';
         let sprFileDialogOpen = false;
         let sprFileProcessor = null;
@@ -1891,9 +1892,10 @@ function newFunction() {
         // =====================================================
         // === 全UI描画
         // =====================================================
-        const renderUI = () => {
-            document.getElementById('dsp-main-box')?.remove();
-            document.getElementById('dsp-spinner-style')?.remove();
+        const renderUIInternal = () => {
+            // 同じidの要素が複数残っていても全て消す（二重表示防止）
+            document.querySelectorAll('#dsp-main-box').forEach(el => el.remove());
+            document.querySelectorAll('#dsp-spinner-style').forEach(el => el.remove());
 
             if (!document.getElementById('dsp-spinner-style')) {
                 const style = document.createElement('style');
@@ -2624,6 +2626,17 @@ function newFunction() {
                     }
                 }
             } catch (e_cache) { }
+        };
+
+        // 描画中の再入を防ぐ（描画途中の refreshCycleValues → renderUI で二重表示になるのを防止）
+        const renderUI = () => {
+            if (isRenderingUI) return;
+            isRenderingUI = true;
+            try {
+                renderUIInternal();
+            } finally {
+                isRenderingUI = false;
+            }
         };
 
         // === 初期化 ===
