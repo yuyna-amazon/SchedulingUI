@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      16.5
+// @version      16.6
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -2006,10 +2006,13 @@ function newFunction() {
                 const rowStyle = isOver
                     ? 'background:#ffebee;border-left:3px solid #f44336;'
                     : 'background:#f5f5f5;';
+                const cycleLabel = td.ssdGroup ? ssdLabel(td.ssdGroup) : '-';
+                const timeText24 = minutesToHHMM(td.timeMinutes);
                 timeRowsHtml +=
-                    '<div style="display:grid;grid-template-columns:60px 96px 46px 42px 42px;gap:6px;margin:3px 0;padding:6px 8px;' + rowStyle + 'border-radius:3px;align-items:center;"' +
-                    (isOver ? ' title="' + td.time + ' の必須合計 ' + timeTotal + ' (上限' + REQUIRED_LIMIT_PER_TIME + '超過)"' : '') + '>' +
-                    '<span style="font-weight:bold;font-size:11px;white-space:nowrap;">' + td.time + '</span>' +
+                    '<div style="display:grid;grid-template-columns:60px 44px 132px 40px 38px 38px;gap:6px;margin:3px 0;padding:6px 8px;' + rowStyle + 'border-radius:3px;align-items:center;"' +
+                    (isOver ? ' title="' + timeText24 + ' の必須合計 ' + timeTotal + ' (上限' + REQUIRED_LIMIT_PER_TIME + '超過)"' : '') + '>' +
+                    '<span style="font-size:10px;font-weight:bold;color:#1565C0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(cycleLabel) + '">' + escapeHtml(cycleLabel) + '</span>' +
+                    '<span style="font-weight:bold;font-size:11px;white-space:nowrap;">' + timeText24 + '</span>' +
                     '<span style="font-size:10px;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + td.serviceType + '">' + getShortServiceType(td.serviceType) + '</span>' +
                     '<span style="color:#795548;font-weight:bold;text-align:center;font-size:11px;">' + lengthText + '</span>' +
                     '<span style="color:#FF9800;font-weight:bold;text-align:center;">' + td.required + '</span>' +
@@ -2148,11 +2151,11 @@ function newFunction() {
 
             // 右パネル
             const rightPanel = document.createElement('div');
-            rightPanel.style.cssText = 'width:350px;min-width:350px;padding:6px 8px;overflow-y:auto;overflow-x:hidden;box-sizing:border-box;';
+            rightPanel.style.cssText = 'width:420px;min-width:420px;padding:6px 8px;overflow-y:auto;overflow-x:hidden;box-sizing:border-box;';
             rightPanel.innerHTML =
                 sectionTitle('開始時刻別', '#4CAF50') +
-                '<div style="display:grid;grid-template-columns:60px 96px 46px 42px 42px;gap:6px;margin-bottom:5px;padding:3px 8px;font-weight:bold;color:#666;font-size:10px;">' +
-                '<span>開始時刻</span><span>サービスタイプ</span><span style="text-align:center;">Length</span><span style="text-align:center;">必須</span><span style="text-align:center;">受諾</span>' +
+                '<div style="display:grid;grid-template-columns:60px 44px 132px 40px 38px 38px;gap:6px;margin-bottom:5px;padding:3px 8px;font-weight:bold;color:#666;font-size:10px;">' +
+                '<span>Cycle</span><span>開始時刻</span><span>サービスタイプ</span><span style="text-align:center;">Length</span><span style="text-align:center;">必須</span><span style="text-align:center;">受諾</span>' +
                 '</div>' +
                 timeRowsHtml;
 
