@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      16.6
+// @version      16.7
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -2611,6 +2611,8 @@ function newFunction() {
                                     }
                                 }
                                 saveSSDMultipliers(mv);
+                                // 反映ONのときはファイルの値を復元用に保持
+                                if (getSprCalcApply()) saveSprCalcMultBackup(mv);
 
                                 // CVP値も反映 (行11,12,15,16 → 0-indexed: 10,11,14,15)
                                 var cvpMap = [
@@ -2640,6 +2642,9 @@ function newFunction() {
                     }
                 }
             } catch (e_cache) { }
+
+            // キャッシュ反映で上書きされた後に、算出SPRの反映（ON時）を最後に適用する
+            applyDerivedSprToMultipliers();
         };
 
         // 描画中の再入を防ぐ（描画途中の refreshCycleValues → renderUI で二重表示になるのを防止）
