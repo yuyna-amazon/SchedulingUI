@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      16.7
+// @version      16.8
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -2023,6 +2023,11 @@ function newFunction() {
             // ---- サマリー ----
             const diff = totalAccepted - totalRequired;
             const diffColor = diff >= 0 ? '#4CAF50' : '#f44336';
+
+            // Fill Rate = 受諾済み / 必須合計
+            const fillRate = totalRequired > 0 ? (totalAccepted / totalRequired) * 100 : null;
+            const fillRateText = fillRate === null ? '-' : fillRate.toFixed(1) + '%';
+            const fillRateColor = fillRate === null ? '#9e9e9e' : (fillRate >= 100 ? '#4CAF50' : (fillRate >= 90 ? '#F57C00' : '#f44336'));
             const proDPHtml = (proDPAccepted || proDPRequired)
                 ? '<span style="font-size:11px;color:#9e9e9e;">※ProDP除外: 受諾 ' + proDPAccepted + '</span>'
                 : '';
@@ -2127,7 +2132,9 @@ function newFunction() {
                 '<span style="font-size:11px;color:#666;">Soft: <strong id="summary-soft-req" style="color:#2196F3;">' + softTotals.fromRequired + '</strong></span>' +
                 '</div>' +
                 '<div style="display:grid;grid-template-columns:1fr auto;align-items:center;margin:4px 0;">' +
-                '<span>受諾済み: <strong style="color:#2e7d32;">' + totalAccepted + '</strong></span>' +
+                '<span>受諾済み: <strong style="color:#2e7d32;">' + totalAccepted + '</strong>' +
+                '<span style="margin-left:8px;font-size:11px;color:#666;" title="受諾済み ' + totalAccepted + ' / 必須合計 ' + totalRequired + '">Fill Rate: <strong style="color:' + fillRateColor + ';">' + fillRateText + '</strong></span>' +
+                '</span>' +
                 '<span style="font-size:11px;color:#666;">Soft: <strong id="summary-soft-acc" style="color:#2196F3;">' + softTotals.fromAccepted + '</strong></span>' +
                 '</div>' +
                 '<div style="display:grid;grid-template-columns:1fr auto;align-items:center;margin:4px 0;padding-top:5px;border-top:1px solid #c8e6c9;">' +
