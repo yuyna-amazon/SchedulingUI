@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      16.8
+// @version      16.9
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -2032,6 +2032,30 @@ function newFunction() {
                 ? '<span style="font-size:11px;color:#9e9e9e;">※ProDP除外: 受諾 ' + proDPAccepted + '</span>'
                 : '';
 
+            // ---- Van / Car 比率（AmFlex Kei Van : AmFlex Kei Car Sml）----
+            // ProDP は currentTimeDataList の生成時点で除外済み
+            let vanReq = 0, vanAcc = 0, carReq = 0, carAcc = 0;
+            currentTimeDataList.forEach(function (td) {
+                const n = String(td.serviceType || '').replace(/_/g, ' ');
+                if (/Car\s*Sml/i.test(n)) {
+                    carReq += td.required || 0;
+                    carAcc += td.accepted || 0;
+                } else if (/\bVan\b/i.test(n)) {
+                    vanReq += td.required || 0;
+                    vanAcc += td.accepted || 0;
+                }
+            });
+            const vcReqTotal = vanReq + carReq;
+            const vcAccTotal = vanAcc + carAcc;
+            const ratioText = (v, t) => (t > 0 ? (v / t * 100).toFixed(1) + '%' : '-');
+            const vanCarTitle = '必須 Van ' + vanReq + ' / Car ' + carReq + ' (計 ' + vcReqTotal + ')　'
+                + '受諾 Van ' + vanAcc + ' / Car ' + carAcc + ' (計 ' + vcAccTotal + ')';
+            const vanCarHtml =
+                '<div style="display:grid;grid-template-columns:1fr auto;align-items:center;margin:4px 0;" title="' + escapeHtml(vanCarTitle) + '">' +
+                '<span style="font-size:11px;color:#666;">必須 Van <strong style="color:#1565C0;">' + ratioText(vanReq, vcReqTotal) + '</strong> / Car <strong style="color:#EF6C00;">' + ratioText(carReq, vcReqTotal) + '</strong></span>' +
+                '<span style="font-size:11px;color:#666;">受諾 Van <strong style="color:#1565C0;">' + ratioText(vanAcc, vcAccTotal) + '</strong> / Car <strong style="color:#EF6C00;">' + ratioText(carAcc, vcAccTotal) + '</strong></span>' +
+                '</div>';
+
             const softTotals = calcSoftTotals();
             const pctLabelText = pct === 0 ? '' : ' ' + (pct > 0 ? '+' : '') + pct + '%';
             const pctLabelColor = pct > 0 ? '#2196F3' : '#f44336';
@@ -2137,6 +2161,7 @@ function newFunction() {
                 '</span>' +
                 '<span style="font-size:11px;color:#666;">Soft: <strong id="summary-soft-acc" style="color:#2196F3;">' + softTotals.fromAccepted + '</strong></span>' +
                 '</div>' +
+                vanCarHtml +
                 '<div style="display:grid;grid-template-columns:1fr auto;align-items:center;margin:4px 0;padding-top:5px;border-top:1px solid #c8e6c9;">' +
                 '<span>Gap: <strong style="color:' + diffColor + ';">' + (diff >= 0 ? '+' : '') + diff + '</strong></span>' +
                 '<span style="font-size:11px;color:#666;">Soft Gap: <strong id="summary-soft-gap" style="color:' + (softTotals.fromAccepted - softTotals.fromRequired >= 0 ? '#4CAF50' : '#f44336') + ';">' + (softTotals.fromAccepted - softTotals.fromRequired >= 0 ? '+' : '') + (softTotals.fromAccepted - softTotals.fromRequired) + '</strong></span>' +
