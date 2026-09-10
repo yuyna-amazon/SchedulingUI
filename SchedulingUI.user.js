@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      16.9
+// @version      17.0
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -35,6 +35,8 @@ function newFunction() {
         let observer = null;
         let cachedTable = null;
         let isFutureRequiredDownloading = false;
+        // 取得を開始したボタン ('week' | 'fill' | null)。「取得中」表示を出す対象を決める
+        let futureDownloadSource = null;
         let lastCalculatedTime = '';
         // 再描画の抑止・遅延用
         let isRenderingUI = false;
@@ -114,6 +116,28 @@ function newFunction() {
         const FUTURE_REQUIRED_DAYS = 7;
         const FUTURE_REQUIRED_START_OFFSET = 0; // 0 = 選択中の日付を含む1週間
 
+        // === ダウンロードボタンのツールチップ ===
+        // \n はブラウザ標準のツールチップ内で改行として表示される
+        const DL_TIP_CAPS = 'Cycle別の Soft Caps / Hard Caps を出力\n'
+            + '対象: 選択中の日付\n'
+            + '列: Station / Cycle / Soft Caps / Hard Caps\n'
+            + 'ファイル: SSD_caps_日付.xlsx';
+
+        const DL_TIP_FILL = '必須合計 / 受諾済み / Gap / Fill Rate / Van・Car比率 を日付ごとに横並びで出力\n'
+            + '対象: 選択中の日付から' + FUTURE_REQUIRED_DAYS + '日間\n'
+            + 'ファイル: SSD_fill_summary_日付.xlsx\n'
+            + '※日付タブを順に切り替えるため時間がかかります';
+
+        const DL_TIP_1D = '開始時刻別の 必須 / 受諾済み 明細を出力\n'
+            + '対象: 選択中の日付\n'
+            + '列: Target Date / Service Type / Length / Start / Time / 必須 / 受諾済み\n'
+            + 'ファイル: SSD_required_1D_日付.xlsx';
+
+        const DL_TIP_1W = '開始時刻別の 必須 / 受諾済み 明細を出力（1Dと同じ列を' + FUTURE_REQUIRED_DAYS + '日分）\n'
+            + '対象: 選択中の日付から' + FUTURE_REQUIRED_DAYS + '日間\n'
+            + 'ファイル: SSD_required_matrix_日付.xlsx\n'
+            + '※日付タブを順に切り替えるため時間がかかります';
+
 
         // === ユーティリティ ===
         const isServiceTypeName = (name) => name && name.includes('AmFlex');
@@ -155,6 +179,23 @@ function newFunction() {
             if (!name) return '-';
             const parts = name.split('_');
             return parts.length >= 2 ? parts.slice(1).join('_') : name;
+        };
+
+        // AmFlex Kei Van / AmFlex Kei Car Sml の必須・受諾を集計
+        // ProDP は timeDataList 生成時点で除外済み
+        const calcVanCarCounts = (list) => {
+            let vanReq = 0, vanAcc = 0, carReq = 0, carAcc = 0;
+            (list || []).forEach(function (td) {
+                const n = String(td.serviceType || '').replace(/_/g, ' ');
+                if (/Car\s*Sml/i.test(n)) {
+                    carReq += td.required || 0;
+                    carAcc += td.accepted || 0;
+                } else if (/\bVan\b/i.test(n)) {
+                    vanReq += td.required || 0;
+                    vanAcc += td.accepted || 0;
+                }
+            });
+            return { vanReq, vanAcc, carReq, carAcc };
         };
 
         const getBaseAccepted = (sk, d, overrides) => (sk === 'SSD_C1' || sk === 'SSD_C3') ? (overrides[sk] || 0) : d.accepted;
@@ -1041,19 +1082,20 @@ function newFunction() {
             showDownloadNotification(fileName);
         };
 
-        const setFutureDownloadButtonState = (isRunning) => {
-            const btn = document.getElementById('dl-future-req-btn');
-            if (!btn) return;
-            btn.disabled = isRunning;
-            btn.textContent = isRunning ? '取得中' : '1W';
-            btn.style.opacity = isRunning ? '0.7' : '1';
-            btn.style.cursor = isRunning ? 'default' : 'pointer';
-            const btn1d = document.getElementById('dl-1d-btn');
-            if (btn1d) {
-                btn1d.disabled = isRunning;
-                btn1d.style.opacity = isRunning ? '0.7' : '1';
-                btn1d.style.cursor = isRunning ? 'default' : 'pointer';
-            }
+        // isRunning: 取得中かどうか / source: 取得を開始したボタン ('week' | 'fill')
+        // 「取得中」のラベルは起動元のボタンにのみ表示し、他は無効化のみ
+        const setFutureDownloadButtonState = (isRunning, source = futureDownloadSource) => {
+            const apply = (btn, label, runningLabel) => {
+                if (!btn) return;
+                btn.disabled = isRunning;
+                btn.textContent = isRunning && runningLabel ? runningLabel : label;
+                btn.style.opacity = isRunning ? '0.7' : '1';
+                btn.style.cursor = isRunning ? 'default' : 'pointer';
+            };
+
+            apply(document.getElementById('dl-future-req-btn'), '1W', source === 'week' ? '取得中' : null);
+            apply(document.getElementById('dl-fill-btn'), 'Fill', source === 'fill' ? '取得中' : null);
+            apply(document.getElementById('dl-1d-btn'), '1D', null);
         };
 
         const downloadOneDayExcel = () => {
@@ -1134,6 +1176,7 @@ function newFunction() {
                 const exportRows = [];
 
             isFutureRequiredDownloading = true;
+            futureDownloadSource = 'week';
             setFutureDownloadButtonState(true);
 
             try {
@@ -1209,6 +1252,121 @@ function newFunction() {
                 }
 
                 isFutureRequiredDownloading = false;
+                futureDownloadSource = null;
+                setFutureDownloadButtonState(false);
+            }
+        };
+
+        // 選択中の日付を含む7日間のサマリー（必須合計 / 受諾済み / Gap / Fill Rate / Van・Car）を
+        // 日付を列に並べたマトリクス形式で出力
+        const downloadFillSummaryExcel = async () => {
+            if (isFutureRequiredDownloading) return;
+            if (!currentSSDData) {
+                alert('データがありません');
+                return;
+            }
+
+            const initialTabs = getDateTabs();
+            const originalIndex = getSelectedDateIndex(initialTabs);
+            if (originalIndex < 0) {
+                alert('選択中の日付タブが見つかりません');
+                return;
+            }
+
+            const originalSelectedText = initialTabs[originalIndex]?.querySelector('.dateText')?.textContent?.trim() || '';
+            const baseDate = resolveBaseDateFromSelectedTab(originalSelectedText);
+
+            const days = [];
+
+            isFutureRequiredDownloading = true;
+            futureDownloadSource = 'fill';
+            setFutureDownloadButtonState(true);
+
+            try {
+                for (let offset = FUTURE_REQUIRED_START_OFFSET; offset < FUTURE_REQUIRED_START_OFFSET + FUTURE_REQUIRED_DAYS; offset++) {
+                    const targetDate = new Date(baseDate);
+                    targetDate.setDate(baseDate.getDate() + offset);
+
+                    if (!findDateTabByDate(targetDate)) break;
+
+                    await clickDateTabByDateAndWait(targetDate);
+
+                    const vc = calcVanCarCounts(currentTimeDataList);
+                    const req = currentTotals.required || 0;
+                    const acc = currentTotals.accepted || 0;
+
+                    // Van / Car は比率（分母は Van + Car の合計。パネル表示と同じ）
+                    const vcReq = vc.vanReq + vc.carReq;
+                    const vcAcc = vc.vanAcc + vc.carAcc;
+
+                    days.push({
+                        label: (targetDate.getMonth() + 1) + '/' + targetDate.getDate(),
+                        required: req,
+                        accepted: acc,
+                        gap: acc - req,
+                        fillRate: req > 0 ? acc / req : null,
+                        vanReqRatio: vcReq > 0 ? vc.vanReq / vcReq : null,
+                        carReqRatio: vcReq > 0 ? vc.carReq / vcReq : null,
+                        vanAccRatio: vcAcc > 0 ? vc.vanAcc / vcAcc : null,
+                        carAccRatio: vcAcc > 0 ? vc.carAcc / vcAcc : null
+                    });
+                }
+
+                if (days.length === 0) {
+                    alert('日付タブが取得できませんでした');
+                    return;
+                }
+
+                const row = (label, pick) => [label, ...days.map(d => {
+                    const v = pick(d);
+                    return v === null || v === undefined ? '' : v;
+                })];
+                const wsData = [
+                    ['', ...days.map(d => d.label)],
+                    row('必須合計', d => d.required),
+                    row('受諾済み', d => d.accepted),
+                    row('Gap', d => d.gap),
+                    row('Fill Rate', d => d.fillRate),
+                    row('必須 Van', d => d.vanReqRatio),
+                    row('必須 Car', d => d.carReqRatio),
+                    row('受諾 Van', d => d.vanAccRatio),
+                    row('受諾 Car', d => d.carAccRatio)
+                ];
+
+                const wb = XLSX.utils.book_new();
+                const ws = XLSX.utils.aoa_to_sheet(wsData);
+
+                ws['!cols'] = [{ wch: 12 }, ...days.map(() => ({ wch: 10 }))];
+
+                // Fill Rate（5行目）と Van / Car 比率（6〜9行目）をパーセント表示にする
+                [4, 5, 6, 7, 8].forEach(r => {
+                    for (let c = 1; c <= days.length; c++) {
+                        const addr = XLSX.utils.encode_cell({ r, c });
+                        if (ws[addr] && typeof ws[addr].v === 'number') ws[addr].z = '0.0%';
+                    }
+                });
+
+                XLSX.utils.book_append_sheet(wb, ws, 'Fill_Summary');
+
+                const firstDate = new Date(baseDate);
+                firstDate.setDate(baseDate.getDate() + FUTURE_REQUIRED_START_OFFSET);
+
+                const fileName = 'SSD_fill_summary_' + formatFileYMD(firstDate) + '.xlsx';
+                XLSX.writeFile(wb, fileName);
+                showDownloadNotification(fileName);
+
+            } catch (err) {
+                console.error('[DSP Counter] fill summary export error', err);
+                alert('Fillダウンロードでエラー: ' + err.message);
+            } finally {
+                try {
+                    await clickDateTabByDateAndWait(baseDate);
+                } catch (restoreErr) {
+                    console.warn('[DSP Counter] 元の日付への復帰に失敗', restoreErr);
+                }
+
+                isFutureRequiredDownloading = false;
+                futureDownloadSource = null;
                 setFutureDownloadButtonState(false);
             }
         };
@@ -2033,18 +2191,7 @@ function newFunction() {
                 : '';
 
             // ---- Van / Car 比率（AmFlex Kei Van : AmFlex Kei Car Sml）----
-            // ProDP は currentTimeDataList の生成時点で除外済み
-            let vanReq = 0, vanAcc = 0, carReq = 0, carAcc = 0;
-            currentTimeDataList.forEach(function (td) {
-                const n = String(td.serviceType || '').replace(/_/g, ' ');
-                if (/Car\s*Sml/i.test(n)) {
-                    carReq += td.required || 0;
-                    carAcc += td.accepted || 0;
-                } else if (/\bVan\b/i.test(n)) {
-                    vanReq += td.required || 0;
-                    vanAcc += td.accepted || 0;
-                }
-            });
+            const { vanReq, vanAcc, carReq, carAcc } = calcVanCarCounts(currentTimeDataList);
             const vcReqTotal = vanReq + carReq;
             const vcAccTotal = vanAcc + carAcc;
             const ratioText = (v, t) => (t > 0 ? (v / t * 100).toFixed(1) + '%' : '-');
@@ -2176,9 +2323,10 @@ function newFunction() {
                 '</div>' +
                 ssdRowsHtml +
                 '<div style="padding-top:10px;border-top:1px solid #ddd;display:flex;gap:6px;">' +
-                '<button id="dl-btn" style="flex:5;padding:5px;background:#4CAF50;color:white;border:none;border-radius:5px;cursor:pointer;font-size:12px;font-weight:bold;">Excel download</button>' +
-                '<button id="dl-1d-btn" style="flex:1;padding:5px;background:#1E88E5;color:white;border:none;border-radius:5px;cursor:pointer;font-size:11px;font-weight:bold;white-space:nowrap;">1D</button>' +
-                '<button id="dl-future-req-btn" style="flex:1;padding:5px;background:#1E88E5;color:white;border:none;border-radius:5px;cursor:pointer;font-size:11px;font-weight:bold;white-space:nowrap;">1W</button>' +
+                '<button id="dl-btn" title="' + escapeHtml(DL_TIP_CAPS) + '" style="flex:5;padding:5px;background:#4CAF50;color:white;border:none;border-radius:5px;cursor:pointer;font-size:12px;font-weight:bold;">Excel download</button>' +
+                '<button id="dl-fill-btn" title="' + escapeHtml(DL_TIP_FILL) + '" style="flex:1;padding:5px;background:#FF9800;color:white;border:none;border-radius:5px;cursor:pointer;font-size:11px;font-weight:bold;white-space:nowrap;">Fill</button>' +
+                '<button id="dl-1d-btn" title="' + escapeHtml(DL_TIP_1D) + '" style="flex:1;padding:5px;background:#1E88E5;color:white;border:none;border-radius:5px;cursor:pointer;font-size:11px;font-weight:bold;white-space:nowrap;">1D</button>' +
+                '<button id="dl-future-req-btn" title="' + escapeHtml(DL_TIP_1W) + '" style="flex:1;padding:5px;background:#1E88E5;color:white;border:none;border-radius:5px;cursor:pointer;font-size:11px;font-weight:bold;white-space:nowrap;">1W</button>' +
                 '</div>';
 
             // 右パネル
@@ -2599,6 +2747,7 @@ function newFunction() {
             });
 
             document.getElementById('dl-btn')?.addEventListener('click', downloadExcel);
+            document.getElementById('dl-fill-btn')?.addEventListener('click', downloadFillSummaryExcel);
             document.getElementById('dl-1d-btn')?.addEventListener('click', downloadOneDayExcel);
             document.getElementById('dl-future-req-btn')?.addEventListener('click', downloadFutureRequiredExcel);
 
