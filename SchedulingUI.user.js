@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      17.0
+// @version      17.1
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -37,6 +37,8 @@ function newFunction() {
         let isFutureRequiredDownloading = false;
         // 取得を開始したボタン ('week' | 'fill' | null)。「取得中」表示を出す対象を決める
         let futureDownloadSource = null;
+        // Fill取得の進捗ラベル（例: '3/14'）。空文字なら「取得中」を表示
+        let fillProgressLabel = '';
         let lastCalculatedTime = '';
         // 再描画の抑止・遅延用
         let isRenderingUI = false;
@@ -116,6 +118,11 @@ function newFunction() {
         const FUTURE_REQUIRED_DAYS = 7;
         const FUTURE_REQUIRED_START_OFFSET = 0; // 0 = 選択中の日付を含む1週間
 
+        // === Fillサマリー設定 ===
+        const FILL_DAYS_DEFAULT = 7;
+        const FILL_DAYS_MIN = 1;
+        const FILL_DAYS_MAX = 31;
+
         // === ダウンロードボタンのツールチップ ===
         // \n はブラウザ標準のツールチップ内で改行として表示される
         const DL_TIP_CAPS = 'Cycle別の Soft Caps / Hard Caps を出力\n'
@@ -124,8 +131,8 @@ function newFunction() {
             + 'ファイル: SSD_caps_日付.xlsx';
 
         const DL_TIP_FILL = '必須合計 / 受諾済み / Gap / Fill Rate / Van・Car比率 を日付ごとに横並びで出力\n'
-            + '対象: 選択中の日付から' + FUTURE_REQUIRED_DAYS + '日間\n'
-            + 'ファイル: SSD_fill_summary_日付.xlsx\n'
+            + '対象: 選択中の日付を1日目として、押した後に日数を指定（' + FILL_DAYS_MIN + '〜' + FILL_DAYS_MAX + '日）\n'
+            + 'ファイル: SSD_fill_summary_日付_日数d.xlsx\n'
             + '※日付タブを順に切り替えるため時間がかかります';
 
         const DL_TIP_1D = '開始時刻別の 必須 / 受諾済み 明細を出力\n'
@@ -370,6 +377,13 @@ function newFunction() {
         // SPR算出パネルの開閉状態（再描画をまたいで保持）
         const getSprCalcPanelOpen = () => getStorage('dsp-spr-calc-open', false);
         const saveSprCalcPanelOpen = (v) => setStorage('dsp-spr-calc-open', !!v);
+        // Fillダウンロードの取得日数（前回入力値を保持）
+        const getFillDays = () => {
+            const n = parseInt(getStorage('dsp-fill-days', String(FILL_DAYS_DEFAULT)), 10);
+            if (isNaN(n)) return FILL_DAYS_DEFAULT;
+            return Math.min(FILL_DAYS_MAX, Math.max(FILL_DAYS_MIN, n));
+        };
+        const saveFillDays = (v) => setStorage('dsp-fill-days', String(v));
         // Block数の集計基準（必須 / 受諾）
         const getSprCalcBasis = () => (getStorage('dsp-spr-calc-basis', 'required') === 'accepted' ? 'accepted' : 'required');
         const saveSprCalcBasis = (v) => setStorage('dsp-spr-calc-basis', v === 'accepted' ? 'accepted' : 'required');
@@ -1094,8 +1108,14 @@ function newFunction() {
             };
 
             apply(document.getElementById('dl-future-req-btn'), '1W', source === 'week' ? '取得中' : null);
-            apply(document.getElementById('dl-fill-btn'), 'Fill', source === 'fill' ? '取得中' : null);
+            apply(document.getElementById('dl-fill-btn'), 'Fill', source === 'fill' ? (fillProgressLabel || '取得中') : null);
             apply(document.getElementById('dl-1d-btn'), '1D', null);
+        };
+
+        // Fill取得の進捗をボタンに表示（例: 3/14）
+        const setFillProgress = (current, total) => {
+            fillProgressLabel = current && total ? current + '/' + total : '';
+            setFutureDownloadButtonState(true, 'fill');
         };
 
         const downloadOneDayExcel = () => {
@@ -1257,14 +1277,107 @@ function newFunction() {
             }
         };
 
-        // 選択中の日付を含む7日間のサマリー（必須合計 / 受諾済み / Gap / Fill Rate / Van・Car）を
+        // Fillダウンロードの日数入力ダイアログ
+        // 取得日数を resolve / キャンセル時は null を resolve
+        const askFillDays = () => new Promise(resolve => {
+            document.getElementById('dsp-filldays-modal')?.remove();
+
+            const overlay = document.createElement('div');
+            overlay.id = 'dsp-filldays-modal';
+            overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:2147483647;display:flex;align-items:center;justify-content:center;font-family:Arial,sans-serif;';
+
+            const panel = document.createElement('div');
+            panel.style.cssText = 'background:#fff;border-radius:8px;padding:16px 18px;min-width:320px;box-shadow:0 6px 24px rgba(0,0,0,0.3);box-sizing:border-box;';
+
+            const current = getFillDays();
+            const presets = [3, 7, 14, 21, 28];
+
+            panel.innerHTML =
+                '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">' +
+                '<div style="font-size:14px;font-weight:bold;color:#F57C00;">Fillサマリー 取得日数</div>' +
+                '<button id="fd-close" style="background:none;border:none;font-size:18px;color:#999;cursor:pointer;line-height:1;">×</button>' +
+                '</div>' +
+                '<div style="font-size:10px;color:#777;margin-bottom:12px;">選択中の日付を1日目として、指定した日数分を取得します（' + FILL_DAYS_MIN + '〜' + FILL_DAYS_MAX + '日）。</div>' +
+                '<div style="display:flex;align-items:center;gap:8px;">' +
+                '<input type="number" id="fd-days" value="' + current + '" min="' + FILL_DAYS_MIN + '" max="' + FILL_DAYS_MAX + '" step="1"' +
+                ' style="width:90px;padding:7px;border:2px solid #FF9800;border-radius:4px;text-align:center;font-size:16px;font-weight:bold;box-sizing:border-box;" />' +
+                '<span style="font-size:13px;font-weight:bold;color:#555;">日分</span>' +
+                '</div>' +
+                '<div style="display:flex;gap:4px;margin-top:8px;">' +
+                presets.map(p => '<button class="fd-preset" data-days="' + p + '" style="flex:1;padding:5px 4px;background:#fff;color:#F57C00;border:1px solid #FFCC80;border-radius:4px;cursor:pointer;font-size:11px;font-weight:bold;white-space:nowrap;">' + p + '日</button>').join('') +
+                '</div>' +
+                '<div id="fd-msg" style="font-size:10px;color:#f44336;margin-top:8px;min-height:14px;"></div>' +
+                '<div style="display:flex;gap:6px;margin-top:6px;padding-top:10px;border-top:1px solid #eee;">' +
+                '<button id="fd-ok" style="flex:3;padding:7px;background:#FF9800;color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:12px;font-weight:bold;">取得開始</button>' +
+                '<button id="fd-cancel" style="flex:2;padding:7px;background:#fff;color:#666;border:1px solid #ccc;border-radius:5px;cursor:pointer;font-size:12px;">キャンセル</button>' +
+                '</div>';
+
+            overlay.appendChild(panel);
+            document.body.appendChild(overlay);
+
+            const inputEl = panel.querySelector('#fd-days');
+            const msgEl = panel.querySelector('#fd-msg');
+
+            let settled = false;
+            const finish = (value) => {
+                if (settled) return;
+                settled = true;
+                document.removeEventListener('keydown', onKeyDown, true);
+                overlay.remove();
+                resolve(value);
+            };
+
+            const submit = () => {
+                const n = parseInt(inputEl.value, 10);
+                if (isNaN(n) || n < FILL_DAYS_MIN || n > FILL_DAYS_MAX) {
+                    msgEl.textContent = FILL_DAYS_MIN + '〜' + FILL_DAYS_MAX + ' の範囲で入力してください。';
+                    inputEl.focus();
+                    inputEl.select();
+                    return;
+                }
+                saveFillDays(n);
+                finish(n);
+            };
+
+            const onKeyDown = (e) => {
+                if (e.key === 'Escape') {
+                    e.stopPropagation();
+                    finish(null);
+                } else if (e.key === 'Enter') {
+                    e.stopPropagation();
+                    submit();
+                }
+            };
+            document.addEventListener('keydown', onKeyDown, true);
+
+            panel.querySelectorAll('.fd-preset').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    inputEl.value = btn.dataset.days;
+                    msgEl.textContent = '';
+                    inputEl.focus();
+                });
+            });
+
+            panel.querySelector('#fd-ok')?.addEventListener('click', submit);
+            panel.querySelector('#fd-cancel')?.addEventListener('click', () => finish(null));
+            panel.querySelector('#fd-close')?.addEventListener('click', () => finish(null));
+            // 背景クリックで閉じる（パネル内クリックは無視）
+            overlay.addEventListener('click', (e) => { if (e.target === overlay) finish(null); });
+
+            inputEl.focus();
+            inputEl.select();
+        });
+
+        // 選択中の日付を起点に days 日分のサマリー（必須合計 / 受諾済み / Gap / Fill Rate / Van・Car比率）を
         // 日付を列に並べたマトリクス形式で出力
-        const downloadFillSummaryExcel = async () => {
+        const downloadFillSummaryExcel = async (dayCount) => {
             if (isFutureRequiredDownloading) return;
             if (!currentSSDData) {
                 alert('データがありません');
                 return;
             }
+
+            const totalDays = Math.min(FILL_DAYS_MAX, Math.max(FILL_DAYS_MIN, parseInt(dayCount, 10) || FILL_DAYS_DEFAULT));
 
             const initialTabs = getDateTabs();
             const originalIndex = getSelectedDateIndex(initialTabs);
@@ -1283,12 +1396,14 @@ function newFunction() {
             setFutureDownloadButtonState(true);
 
             try {
-                for (let offset = FUTURE_REQUIRED_START_OFFSET; offset < FUTURE_REQUIRED_START_OFFSET + FUTURE_REQUIRED_DAYS; offset++) {
+                for (let offset = 0; offset < totalDays; offset++) {
                     const targetDate = new Date(baseDate);
                     targetDate.setDate(baseDate.getDate() + offset);
 
+                    // タブが無い日（表示範囲外）に到達したらそこで打ち切る
                     if (!findDateTabByDate(targetDate)) break;
 
+                    setFillProgress(days.length + 1, totalDays);
                     await clickDateTabByDateAndWait(targetDate);
 
                     const vc = calcVanCarCounts(currentTimeDataList);
@@ -1348,12 +1463,14 @@ function newFunction() {
 
                 XLSX.utils.book_append_sheet(wb, ws, 'Fill_Summary');
 
-                const firstDate = new Date(baseDate);
-                firstDate.setDate(baseDate.getDate() + FUTURE_REQUIRED_START_OFFSET);
-
-                const fileName = 'SSD_fill_summary_' + formatFileYMD(firstDate) + '.xlsx';
+                const fileName = 'SSD_fill_summary_' + formatFileYMD(baseDate) + '_' + days.length + 'd.xlsx';
                 XLSX.writeFile(wb, fileName);
                 showDownloadNotification(fileName);
+
+                if (days.length < totalDays) {
+                    alert(totalDays + '日分を指定しましたが、日付タブが ' + days.length + '日分しか見つかりませんでした。\n'
+                        + days.length + '日分で出力しています。');
+                }
 
             } catch (err) {
                 console.error('[DSP Counter] fill summary export error', err);
@@ -1367,8 +1484,17 @@ function newFunction() {
 
                 isFutureRequiredDownloading = false;
                 futureDownloadSource = null;
+                fillProgressLabel = '';
                 setFutureDownloadButtonState(false);
             }
+        };
+
+        // ボタン押下 → 日数入力ポップアップ → 取得開始
+        const startFillSummaryDownload = async () => {
+            if (isFutureRequiredDownloading) return;
+            const dayCount = await askFillDays();
+            if (dayCount === null) return;
+            await downloadFillSummaryExcel(dayCount);
         };
 
         const showDownloadNotification = (fileName) => {
@@ -2747,7 +2873,7 @@ function newFunction() {
             });
 
             document.getElementById('dl-btn')?.addEventListener('click', downloadExcel);
-            document.getElementById('dl-fill-btn')?.addEventListener('click', downloadFillSummaryExcel);
+            document.getElementById('dl-fill-btn')?.addEventListener('click', startFillSummaryDownload);
             document.getElementById('dl-1d-btn')?.addEventListener('click', downloadOneDayExcel);
             document.getElementById('dl-future-req-btn')?.addEventListener('click', downloadFutureRequiredExcel);
 
