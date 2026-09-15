@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      17.3
+// @version      17.4
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -2774,15 +2774,34 @@ function newFunction() {
                 if (isHidden) { showUI(); } else { hideUI(); }
             });
 
-            setTimeout(function () {
-                const h = midPanel.offsetHeight;
-                if (h > 0) {
-                    rightPanel.style.height = h + 'px';
-                    rightPanel.style.maxHeight = h + 'px';
-                    sprCalcPanel.style.height = h + 'px';
-                    sprCalcPanel.style.maxHeight = h + 'px';
+            // 左パネル・中パネルの「本来の高さ」を基準に、右パネル / SPR算出パネルの高さを合わせる。
+            // box は align-items:stretch なので、そのまま offsetHeight を測ると
+            // 一番高いパネル（＝右パネル）に引き伸ばされた値になり、左・中パネルの下に余白ができる。
+            // いったん align-items:flex-start にして、引き伸ばされる前の高さを測ってから適用する。
+            var syncPanelHeights = function () {
+                if (isHidden) return;
+
+                // 前回適用した高さを解除してから素の高さを測る
+                rightPanel.style.height = '';
+                rightPanel.style.maxHeight = '';
+                sprCalcPanel.style.height = '';
+                sprCalcPanel.style.maxHeight = '';
+
+                const prevAlign = box.style.alignItems;
+                box.style.alignItems = 'flex-start';
+                // leftPanel / midPanel は max-height:600px なので、ここでは min(内容, 600) が取れる
+                const base = Math.max(leftPanel.offsetHeight, midPanel.offsetHeight);
+                box.style.alignItems = prevAlign || 'stretch';
+
+                if (base > 0) {
+                    rightPanel.style.height = base + 'px';
+                    rightPanel.style.maxHeight = base + 'px';
+                    sprCalcPanel.style.height = base + 'px';
+                    sprCalcPanel.style.maxHeight = base + 'px';
                 }
-            }, 0);
+            };
+
+            setTimeout(syncPanelHeights, 0);
 
             // ---- イベント登録 ----
             SPR_LIST.forEach(function (ssd) {
