@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      17.2
+// @version      17.3
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -119,6 +119,10 @@ function newFunction() {
         const FUTURE_REQUIRED_EXPORT_KEYS = ['SSD_1', 'SSD_1_B', 'SSD_2', 'SSD_3', 'SSD_3_B', 'SSD_4'];
         const FUTURE_REQUIRED_DAYS = 7;
         const FUTURE_REQUIRED_START_OFFSET = 0; // 0 = 選択中の日付を含む1週間
+
+        // === Daily SPR設定テンプレート（Amazon Drive） ===
+        const SPR_TEMPLATE_NAME = 'Daily SPR設定.xlsx';
+        const SPR_TEMPLATE_URL = 'https://drive.corp.amazon.com/view/yuyna@/Daily%20SPR%E8%A8%AD%E5%AE%9A.xlsx?download=true';
 
         // === Fillサマリー設定 ===
         const FILL_DAYS_DEFAULT = 7;
@@ -560,6 +564,11 @@ function newFunction() {
             return month + '月' + day + '日' + dow;
         };
 
+        // Date → 「9月15日（火）」
+        const JP_DOW = ['日', '月', '火', '水', '木', '金', '土'];
+        const formatDateLabelJP = (date) =>
+            (date.getMonth() + 1) + '月' + date.getDate() + '日（' + JP_DOW[date.getDay()] + '）';
+
         const parseMonthDayFromText = (text) => {
             const match = DATE_REGEX.exec(text || '');
             if (!match) return null;
@@ -708,6 +717,110 @@ function newFunction() {
                 if (retry < 2) return clickDateTabByDateAndWait(date, retry + 1);
                 throw err;
             }
+        };
+
+        // === 「元の日付に戻り中」オーバーレイ ===
+        let restoreOverlayTimer = null;
+
+        const hideRestoreOverlay = () => {
+            if (restoreOverlayTimer) {
+                clearInterval(restoreOverlayTimer);
+                restoreOverlayTimer = null;
+            }
+            document.getElementById('dsp-restore-overlay')?.remove();
+        };
+
+        const showRestoreOverlay = (label) => {
+            hideRestoreOverlay();
+
+            const box = document.createElement('div');
+            box.id = 'dsp-restore-overlay';
+            // ダウンロード完了通知（緑・画面中央）と重ならないよう中央より下に配置
+            box.style.cssText = 'position:fixed;top:calc(50% + 115px);left:50%;transform:translate(-50%,-50%);'
+                + 'padding:18px 30px;background:#1E88E5;color:#fff;border-radius:8px;'
+                + 'box-shadow:0 4px 20px rgba(0,0,0,0.35);z-index:2147483646;text-align:center;'
+                + 'font-family:Arial,sans-serif;pointer-events:none;';
+            box.innerHTML =
+                '<div style="font-size:11px;opacity:0.85;">元の日付</div>' +
+                '<div style="font-size:20px;font-weight:bold;white-space:nowrap;margin:6px 0;">' +
+                escapeHtml(label) +
+                '</div>' +
+                '<div style="font-size:13px;white-space:nowrap;">に戻っています<span id="dsp-restore-dots">...</span></div>';
+            document.body.appendChild(box);
+
+            // 「…」を回して処理中であることを示す
+            let step = 0;
+            restoreOverlayTimer = setInterval(() => {
+                const dots = document.getElementById('dsp-restore-dots');
+                if (!dots) return;
+                step = (step + 1) % 4;
+                dots.textContent = '.'.repeat(step);
+            }, 400);
+        };
+
+        // 複数日を巡回した後に元の日付タブへ戻す
+        // 日付を進めるとタブリストが先送りされ、元の日付のタブがDOMから消えることがあるため
+        // 段階的にフォールバックする
+        const restoreDateTab = async (baseDate, originalTabEl) => {
+            // 既に元の日付なら何もしない
+            if (isSameMonthDay(baseDate, getSelectedDateText())) return true;
+
+            showRestoreOverlay(formatDateLabelJP(baseDate));
+            try {
+                return await runRestoreDateTab(baseDate, originalTabEl);
+            } finally {
+                hideRestoreOverlay();
+            }
+        };
+
+        const runRestoreDateTab = async (baseDate, originalTabEl) => {
+            // 1) 開始時に保持したタブ要素がDOMに残っていれば直接クリック
+            if (originalTabEl && document.contains(originalTabEl)) {
+                try {
+                    await clickDateTabAndWait(originalTabEl);
+                    if (isSameMonthDay(baseDate, getSelectedDateText())) return true;
+                } catch (e) {
+                    console.warn('[DSP Counter] 保持タブでの復帰に失敗', e);
+                }
+            }
+
+            // 2) 日付から再検索してクリック
+            try {
+                await clickDateTabByDateAndWait(baseDate);
+                if (isSameMonthDay(baseDate, getSelectedDateText())) return true;
+            } catch (e) {
+                console.warn('[DSP Counter] 日付検索での復帰に失敗', e);
+            }
+
+            // 3) タブが表示範囲外の場合、リスト先頭（最も古い日付）へ移動して
+            //    リストを巻き戻しながら元の日付タブの再出現を待つ
+            for (let attempt = 0; attempt < 10; attempt++) {
+                if (isSameMonthDay(baseDate, getSelectedDateText())) return true;
+
+                const direct = findDateTabByDate(baseDate);
+                if (direct) {
+                    try {
+                        await clickDateTabAndWait(direct);
+                        if (isSameMonthDay(baseDate, getSelectedDateText())) return true;
+                    } catch (e) {
+                        console.warn('[DSP Counter] 再出現タブでの復帰に失敗', e);
+                    }
+                }
+
+                const tabs = getDateTabs();
+                const first = tabs[0];
+                // 先頭が既に選択済み = これ以上巻き戻せない
+                if (!first || first.classList.contains('selected')) break;
+
+                try {
+                    await clickDateTabAndWait(first);
+                } catch (e) {
+                    console.warn('[DSP Counter] タブリストの巻き戻しに失敗', e);
+                    break;
+                }
+            }
+
+            return isSameMonthDay(baseDate, getSelectedDateText());
         };
 
         // === 行データ抽出 ===
@@ -1199,7 +1312,8 @@ function newFunction() {
                 return;
             }
 
-            const originalSelectedText = initialTabs[originalIndex]?.querySelector('.dateText')?.textContent?.trim() || '';
+            const originalTabEl = initialTabs[originalIndex] || null;
+            const originalSelectedText = originalTabEl?.querySelector('.dateText')?.textContent?.trim() || '';
 
             const baseDate = resolveBaseDateFromSelectedTab(originalSelectedText);
 
@@ -1276,7 +1390,11 @@ function newFunction() {
                 alert('未来1週間ダウンロードでエラー: ' + err.message);
             } finally {
                 try {
-                    await clickDateTabByDateAndWait(baseDate);
+                    const restored = await restoreDateTab(baseDate, originalTabEl);
+                    if (!restored) {
+                        alert('元の日付（' + formatYMD(baseDate) + '）に戻せませんでした。\n'
+                            + 'お手数ですが手動で日付タブを選択してください。');
+                    }
                 } catch (restoreErr) {
                     console.warn('[DSP Counter] 元の日付への復帰に失敗', restoreErr);
                 }
@@ -1396,7 +1514,8 @@ function newFunction() {
                 return;
             }
 
-            const originalSelectedText = initialTabs[originalIndex]?.querySelector('.dateText')?.textContent?.trim() || '';
+            const originalTabEl = initialTabs[originalIndex] || null;
+            const originalSelectedText = originalTabEl?.querySelector('.dateText')?.textContent?.trim() || '';
             const baseDate = resolveBaseDateFromSelectedTab(originalSelectedText);
 
             const days = [];
@@ -1487,7 +1606,13 @@ function newFunction() {
                 alert('Fillダウンロードでエラー: ' + err.message);
             } finally {
                 try {
-                    await clickDateTabByDateAndWait(baseDate);
+                    fillProgressLabel = '復帰中';
+                    setFutureDownloadButtonState(true, 'fill');
+                    const restored = await restoreDateTab(baseDate, originalTabEl);
+                    if (!restored) {
+                        alert('元の日付（' + formatYMD(baseDate) + '）に戻せませんでした。\n'
+                            + 'お手数ですが手動で日付タブを選択してください。');
+                    }
                 } catch (restoreErr) {
                     console.warn('[DSP Counter] 元の日付への復帰に失敗', restoreErr);
                 }
@@ -1507,6 +1632,7 @@ function newFunction() {
             await downloadFillSummaryExcel(dayCount);
         };
 
+        // 画面中央に表示。復帰中オーバーレイ（青）は重ならないよう下にずらしてある
         const showDownloadNotification = (fileName) => {
             const n = document.createElement('div');
             n.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);padding:20px 30px;background:#4CAF50;color:white;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,0.3);z-index:10001;font-size:16px;text-align:center;';
@@ -1632,6 +1758,17 @@ function newFunction() {
                 '<div style="display:flex;gap:6px;margin-top:10px;padding-top:10px;border-top:1px solid #eee;">' +
                 '<button id="tr-save" style="flex:3;padding:7px;background:#4CAF50;color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:12px;font-weight:bold;">保存して再計算</button>' +
                 '<button id="tr-reset" style="flex:2;padding:7px;background:#fff;color:#666;border:1px solid #ccc;border-radius:5px;cursor:pointer;font-size:12px;">初期値に戻す</button>' +
+                '</div>' +
+                '<div style="margin-top:12px;padding-top:10px;border-top:1px solid #eee;">' +
+                '<a href="' + escapeHtml(SPR_TEMPLATE_URL) + '" rel="noopener noreferrer"' +
+                ' title="' + escapeHtml(SPR_TEMPLATE_NAME + ' をAmazon Driveからダウンロード') + '"' +
+                ' style="display:flex;align-items:center;justify-content:center;gap:6px;padding:7px;' +
+                'background:#fff;color:#00897B;border:1px solid #80CBC4;border-radius:5px;' +
+                'text-decoration:none;font-size:12px;font-weight:bold;box-sizing:border-box;">' +
+                '<span style="font-size:13px;">&#11015;</span>' +
+                '<span>' + escapeHtml(SPR_TEMPLATE_NAME) + ' テンプレート</span>' +
+                '</a>' +
+                '<div style="font-size:10px;color:#777;margin-top:5px;">SPR/CVP参照で読み込むファイルのテンプレートです。クリックするとダウンロードが始まります。</div>' +
                 '</div>';
 
             overlay.appendChild(panel);
@@ -2413,14 +2550,15 @@ function newFunction() {
             // ---- DOM組み立て ----
             const box = document.createElement('div');
             box.id = 'dsp-main-box';
-            box.style.cssText = 'position:fixed;bottom:20px;right:5px;display:flex;align-items:flex-start;background:#fff;border:2px solid #4CAF50;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,0.1);z-index:9999;font-size:12px;';
+            // align-items:stretch で各パネルの高さを最も高いパネルに揃える（境界線も揃う）
+            box.style.cssText = 'position:fixed;bottom:20px;right:5px;display:flex;align-items:stretch;background:#fff;border:2px solid #4CAF50;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,0.1);z-index:9999;font-size:12px;';
 
             // 左パネル
             const leftPanel = document.createElement('div');
             leftPanel.style.cssText = 'width:270px;min-width:270px;padding:6px 8px;border-right:2px solid #e3f2fd;max-height:600px;overflow-y:auto;overflow-x:hidden;box-sizing:border-box;';
             leftPanel.innerHTML =
-                '<div style="display:flex;align-items:baseline;justify-content:center;gap:8px;margin-bottom:4px;padding-bottom:4px;border-bottom:2px solid #e3f2fd;">' +
-                '<span style="font-size:18px;font-weight:bold;color:#333;">' + formatSelectedDateLabel() + '</span>' +
+                '<div style="display:flex;align-items:baseline;justify-content:center;gap:8px;margin-bottom:8px;padding:12px 0 14px;border-bottom:2px solid #e3f2fd;">' +
+                '<span style="font-size:22px;font-weight:bold;color:#333;">' + formatSelectedDateLabel() + '</span>' +
                 '<span id="dsp-last-calc-time" style="font-size:11px;color:#999;">' + lastCalculatedTime + '</span>' +
                 '</div>' +
                 '<div style="display:grid;grid-template-columns:54px 1fr 1fr 1fr;gap:4px;margin-bottom:6px;padding:0 2px;font-size:12px;color:#999;font-weight:bold;">' +
@@ -2488,7 +2626,7 @@ function newFunction() {
                 '</div>' +
                 ssdRowsHtml +
                 '<div style="padding-top:10px;border-top:1px solid #ddd;display:flex;gap:6px;">' +
-                '<button id="dl-btn" title="' + escapeHtml(DL_TIP_CAPS) + '" style="flex:5;padding:5px;background:#4CAF50;color:white;border:none;border-radius:5px;cursor:pointer;font-size:12px;font-weight:bold;">Excel download</button>' +
+                '<button id="dl-btn" title="' + escapeHtml(DL_TIP_CAPS) + '" style="flex:5;padding:5px;background:#4CAF50;color:white;border:none;border-radius:5px;cursor:pointer;font-size:12px;font-weight:bold;">Cap Set File</button>' +
                 '<button id="dl-fill-btn" title="' + escapeHtml(DL_TIP_FILL) + '" style="flex:1;padding:5px;background:#FF9800;color:white;border:none;border-radius:5px;cursor:pointer;font-size:11px;font-weight:bold;white-space:nowrap;">Fill</button>' +
                 '<button id="dl-1d-btn" title="' + escapeHtml(DL_TIP_1D) + '" style="flex:1;padding:5px;background:#1E88E5;color:white;border:none;border-radius:5px;cursor:pointer;font-size:11px;font-weight:bold;white-space:nowrap;">1D</button>' +
                 '<button id="dl-future-req-btn" title="' + escapeHtml(DL_TIP_1W) + '" style="flex:1;padding:5px;background:#1E88E5;color:white;border:none;border-radius:5px;cursor:pointer;font-size:11px;font-weight:bold;white-space:nowrap;">1W</button>' +
