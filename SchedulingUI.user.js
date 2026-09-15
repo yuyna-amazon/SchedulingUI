@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      17.1
+// @version      17.2
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -23,8 +23,10 @@ function newFunction() {
             ? GM_info.script.version
             : '15.0';
 
-        // === 同一開始時刻あたりの必須上限（超過でハイライト） ===
-        const REQUIRED_LIMIT_PER_TIME = 15;
+        // === 同一開始時刻あたりの必須上限（Yard capacity / 超過でハイライト） ===
+        const YARD_CAPACITY_DEFAULT = 15;
+        const YARD_CAPACITY_MIN = 1;
+        const YARD_CAPACITY_MAX = 999;
 
         // === 状態管理 ===
         let currentSSDData = null;
@@ -507,6 +509,14 @@ function newFunction() {
         };
 
         const saveSSDTimeRangeConfig = (cfg) => setStorage('dsp-ssd-time-ranges', cfg);
+
+        // Yard capacity（同一開始時刻の必須合計の上限。超過で右パネルをハイライト）
+        const getYardCapacity = () => {
+            const n = parseInt(getStorage('dsp-yard-capacity', String(YARD_CAPACITY_DEFAULT)), 10);
+            if (isNaN(n)) return YARD_CAPACITY_DEFAULT;
+            return Math.min(YARD_CAPACITY_MAX, Math.max(YARD_CAPACITY_MIN, n));
+        };
+        const saveYardCapacity = (v) => setStorage('dsp-yard-capacity', String(v));
 
         const applySSDTimeRanges = () => {
             const cfg = getSSDTimeRangeConfig();
@@ -1610,6 +1620,14 @@ function newFunction() {
                 '<label style="display:flex;align-items:center;gap:6px;margin-top:10px;font-size:11px;color:#555;cursor:pointer;">' +
                 '<input type="checkbox" id="tr-link" checked />隣接する境界を連動させる（推奨）' +
                 '</label>' +
+                '<div style="margin-top:12px;padding-top:10px;border-top:1px solid #eee;">' +
+                '<div style="display:flex;align-items:center;gap:8px;">' +
+                '<span style="font-size:12px;font-weight:bold;color:#c62828;white-space:nowrap;">Yard capacity</span>' +
+                '<input type="number" id="tr-yard-cap" value="' + getYardCapacity() + '" min="' + YARD_CAPACITY_MIN + '" max="' + YARD_CAPACITY_MAX + '" step="1"' +
+                ' style="width:80px;padding:5px;border:2px solid #ef9a9a;border-radius:4px;text-align:center;font-size:14px;font-weight:bold;box-sizing:border-box;color:#c62828;" />' +
+                '</div>' +
+                '<div style="font-size:10px;color:#777;margin-top:5px;">右パネルの開始時刻別で、同一開始時刻の必須合計がこの値を<strong>超えた</strong>行を赤くハイライトします。</div>' +
+                '</div>' +
                 '<div id="tr-msg" style="font-size:10px;color:#f44336;margin-top:8px;min-height:14px;"></div>' +
                 '<div style="display:flex;gap:6px;margin-top:10px;padding-top:10px;border-top:1px solid #eee;">' +
                 '<button id="tr-save" style="flex:3;padding:7px;background:#4CAF50;color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:12px;font-weight:bold;">保存して再計算</button>' +
@@ -1647,9 +1665,23 @@ function newFunction() {
                 return { cfg: out, error };
             };
 
+            const readYardCapacity = () => {
+                const el = panel.querySelector('#tr-yard-cap');
+                const n = parseInt(el ? el.value : '', 10);
+                if (isNaN(n) || n < YARD_CAPACITY_MIN || n > YARD_CAPACITY_MAX) return null;
+                return n;
+            };
+
             const validate = () => {
                 const { cfg: c, error } = readForm();
                 if (error) { msgEl.style.color = '#f44336'; msgEl.textContent = error; return null; }
+
+                const yardCap = readYardCapacity();
+                if (yardCap === null) {
+                    msgEl.style.color = '#f44336';
+                    msgEl.textContent = 'Yard capacity は ' + YARD_CAPACITY_MIN + '〜' + YARD_CAPACITY_MAX + ' の範囲で入力してください';
+                    return null;
+                }
 
                 const names = readNames();
 
@@ -1687,7 +1719,7 @@ function newFunction() {
                 } else {
                     msgEl.textContent = '';
                 }
-                return { cfg: c, labels: names };
+                return { cfg: c, labels: names, yardCapacity: yardCap };
             };
 
             // 境界連動
@@ -1720,6 +1752,9 @@ function newFunction() {
                 if (el) el.addEventListener('input', validate);
             });
 
+            // Yard capacity の検証
+            panel.querySelector('#tr-yard-cap')?.addEventListener('input', validate);
+
             panel.querySelector('#tr-reset').addEventListener('click', function () {
                 SSD_TIME_RANGE_ORDER.forEach(k => {
                     const def = SSD_TIME_RANGE_DEFAULTS[k];
@@ -1727,6 +1762,8 @@ function newFunction() {
                     if (def.max !== null) panel.querySelector('#tr-' + k + '-max').value = minutesToHHMM(def.max);
                     panel.querySelector('#tr-' + k + '-name').value = SSD_LABEL_DEFAULTS[k];
                 });
+                const capEl = panel.querySelector('#tr-yard-cap');
+                if (capEl) capEl.value = YARD_CAPACITY_DEFAULT;
                 validate();
             });
 
@@ -1735,6 +1772,7 @@ function newFunction() {
                 if (!result) return;
                 saveSSDTimeRangeConfig(result.cfg);
                 saveSSDLabels(result.labels);
+                saveYardCapacity(result.yardCapacity);
                 applySSDTimeRanges();
                 refreshSSDLabelCache();
                 close();
@@ -2274,7 +2312,8 @@ function newFunction() {
                 return a.serviceType.localeCompare(b.serviceType);
             });
 
-            // 同じ開始時刻ごとの必須合計（超過判定用）
+            // 同じ開始時刻ごとの必須合計（Yard capacity 超過判定用）
+            const yardCapacity = getYardCapacity();
             const requiredByTime = {};
             for (let ri = 0; ri < sortedTimeData.length; ri++) {
                 const key = sortedTimeData[ri].timeMinutes;
@@ -2286,7 +2325,7 @@ function newFunction() {
                 const td = sortedTimeData[ti];
                 const lengthText = (td.blockLength === '' || td.blockLength === undefined || td.blockLength === null) ? '-' : td.blockLength;
                 const timeTotal = requiredByTime[td.timeMinutes] || 0;
-                const isOver = timeTotal > REQUIRED_LIMIT_PER_TIME;
+                const isOver = timeTotal > yardCapacity;
                 const rowStyle = isOver
                     ? 'background:#ffebee;border-left:3px solid #f44336;'
                     : 'background:#f5f5f5;';
@@ -2294,7 +2333,7 @@ function newFunction() {
                 const timeText24 = minutesToHHMM(td.timeMinutes);
                 timeRowsHtml +=
                     '<div style="display:grid;grid-template-columns:60px 44px 132px 40px 38px 38px;gap:6px;margin:3px 0;padding:6px 8px;' + rowStyle + 'border-radius:3px;align-items:center;"' +
-                    (isOver ? ' title="' + timeText24 + ' の必須合計 ' + timeTotal + ' (上限' + REQUIRED_LIMIT_PER_TIME + '超過)"' : '') + '>' +
+                    (isOver ? ' title="' + timeText24 + ' の必須合計 ' + timeTotal + ' (Yard capacity ' + yardCapacity + ' 超過)"' : '') + '>' +
                     '<span style="font-size:10px;font-weight:bold;color:#1565C0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(cycleLabel) + '">' + escapeHtml(cycleLabel) + '</span>' +
                     '<span style="font-weight:bold;font-size:11px;white-space:nowrap;">' + timeText24 + '</span>' +
                     '<span style="font-size:10px;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + td.serviceType + '">' + getShortServiceType(td.serviceType) + '</span>' +
