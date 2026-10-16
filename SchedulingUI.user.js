@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      17.4
+// @version      18.2
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -74,6 +74,8 @@ function newFunction() {
             'SSD_3': 0, 'SSD_C3': 0, 'SSD_3_B': 0, 'SSD_4': 0
         };
         const C1C3_OVERRIDE_DEFAULTS = { 'SSD_C1': 0, 'SSD_C3': 0, 'SSD_C1_1': 0, 'SSD_C1_1B': 0, 'SSD_C3_3B': 0, 'SSD_C3_4': 0, 'CVP_BUF_1': 0, 'CVP_BUF_1B': 0, 'CVP_BUF_3B': 0, 'CVP_BUF_4': 0 };
+        const CVP_FIXED_OVERRIDE_KEYS = ['SSD_C1_1', 'SSD_C1_1B', 'SSD_C3_3B', 'SSD_C3_4'];
+        const CVP_BUFFER_OVERRIDE_KEYS = ['CVP_BUF_1', 'CVP_BUF_1B', 'CVP_BUF_3B', 'CVP_BUF_4'];
 
         // === SSD時間帯（分, min <= 開始時刻 < max）===
         // 設定パネル（⚙）から変更可能。max: null = 上限なし（Infinity）
@@ -129,27 +131,8 @@ function newFunction() {
         const FILL_DAYS_MIN = 1;
         const FILL_DAYS_MAX = 31;
 
-        // === ダウンロードボタンのツールチップ ===
-        // \n はブラウザ標準のツールチップ内で改行として表示される
-        const DL_TIP_CAPS = 'Cycle別の Soft Caps / Hard Caps を出力\n'
-            + '対象: 選択中の日付\n'
-            + '列: Station / Cycle / Soft Caps / Hard Caps\n'
-            + 'ファイル: SSD_caps_日付.xlsx';
-
-        const DL_TIP_FILL = '必須合計 / 受諾済み / Gap / Fill Rate / Van・Car比率 を日付ごとに横並びで出力\n'
-            + '対象: 選択中の日付を1日目として、押した後に日数を指定（' + FILL_DAYS_MIN + '〜' + FILL_DAYS_MAX + '日）\n'
-            + 'ファイル: SSD_fill_summary_日付_日数d.xlsx\n'
-            + '※日付タブを順に切り替えるため時間がかかります';
-
-        const DL_TIP_1D = '開始時刻別の 必須 / 受諾済み 明細を出力\n'
-            + '対象: 選択中の日付\n'
-            + '列: Target Date / Service Type / Length / Start / Time / 必須 / 受諾済み\n'
-            + 'ファイル: SSD_required_1D_日付.xlsx';
-
-        const DL_TIP_1W = '開始時刻別の 必須 / 受諾済み 明細を出力（1Dと同じ列を' + FUTURE_REQUIRED_DAYS + '日分）\n'
-            + '対象: 選択中の日付から' + FUTURE_REQUIRED_DAYS + '日間\n'
-            + 'ファイル: SSD_required_matrix_日付.xlsx\n'
-            + '※日付タブを順に切り替えるため時間がかかります';
+        // CVP出力の Node 列（拠点コード）。出所は caps 出力（downloadExcel）でハードコードしている 'VFK1' と同じ
+        const CVP_EXPORT_NODE = 'VFK1';
 
 
         // === ユーティリティ ===
@@ -247,7 +230,9 @@ function newFunction() {
         };
 
         const calculateCycleSoft = (sk, baseValue, buffer, multiplier, pct, overrides, subtract, softAdjust, ssdData, allMultipliers) => {
-            if (subtract) {
+            const cvpFixedMode = CVP_FIXED_OVERRIDE_KEYS.every(k => overrides && overrides[k] !== undefined);
+            if (!cvpFixedMode && (sk === 'SSD_C1' || sk === 'SSD_C3')) return 0;
+            if (subtract && cvpFixedMode) {
                 const fixedMode = get1B3BFixedMode();
                 if (sk === 'SSD_1') {
                     if (fixedMode) {
@@ -379,6 +364,15 @@ function newFunction() {
         const saveHardPct = (v) => setStorage('dsp-hard-pct', String(v));
         const getC1C3Overrides = () => getStorage('dsp-c1c3-overrides', C1C3_OVERRIDE_DEFAULTS);
         const saveC1C3Overrides = (v) => setStorage('dsp-c1c3-overrides', v);
+        const getCvpApplyEnabled = () => getStorage('dsp-cvp-apply-enabled', true);
+        const saveCvpApplyEnabled = (v) => setStorage('dsp-cvp-apply-enabled', !!v);
+        const getEffectiveC1C3Overrides = () => {
+            const overrides = getC1C3Overrides();
+            if (getCvpApplyEnabled()) return overrides;
+            const effective = { ...overrides, 'SSD_C1': 0, 'SSD_C3': 0 };
+            CVP_FIXED_OVERRIDE_KEYS.concat(CVP_BUFFER_OVERRIDE_KEYS).forEach(k => { delete effective[k]; });
+            return effective;
+        };
         const get1B3BFixedMode = () => true;
         // SPR算出パネルの開閉状態（再描画をまたいで保持）
         const getSprCalcPanelOpen = () => getStorage('dsp-spr-calc-open', false);
@@ -393,6 +387,58 @@ function newFunction() {
         // Block数の集計基準（必須 / 受諾）
         const getSprCalcBasis = () => (getStorage('dsp-spr-calc-basis', 'required') === 'accepted' ? 'accepted' : 'required');
         const saveSprCalcBasis = (v) => setStorage('dsp-spr-calc-basis', v === 'accepted' ? 'accepted' : 'required');
+        // 開始時刻別の必須 adjust（行ごとの ±台数 / SPR算出パネルのBlock数にのみ反映）
+        const TIME_REQ_ADJUST_LIMIT = 999;
+        const lenKeyOf = (td) => (td.blockLength === '' || td.blockLength === undefined || td.blockLength === null)
+            ? '-' : String(td.blockLength);
+        const normalizeTimeAdjDelta = (raw) => {
+            const n = Number(raw);
+            if (!Number.isFinite(n)) return 0;
+            const v = Math.round(n);
+            if (v === 0) return 0;
+            return Math.min(TIME_REQ_ADJUST_LIMIT, Math.max(-TIME_REQ_ADJUST_LIMIT, v));
+        };
+        const normalizeTimeReqAdjust = (src) => {
+            const out = {};
+            if (src && typeof src === 'object') {
+                Object.keys(src).forEach(key => {
+                    const v = normalizeTimeAdjDelta(src[key]);
+                    if (v !== 0) out[key] = v;
+                });
+            }
+            return out;
+        };
+        const getTimeReqAdjust = () => normalizeTimeReqAdjust(getStorage('dsp-time-req-adjust', {}));
+        const saveTimeReqAdjust = (v) => setStorage('dsp-time-req-adjust', normalizeTimeReqAdjust(v));
+        // td のオブジェクト参照 → 行キー（Cycle | 開始時刻 | Length | サービスタイプ | 出現番号）
+        const buildTimeAdjKeyMap = () => {
+            const keyMap = new Map();
+            const seen = {};
+            (currentTimeDataList || []).forEach(td => {
+                const base = String(td.ssdGroup || '-') + '|' + String(td.timeMinutes) + '|' + lenKeyOf(td) +
+                    '|' + String(td.serviceType === undefined || td.serviceType === null ? '' : td.serviceType);
+                const occ = seen[base] || 0;
+                seen[base] = occ + 1;
+                keyMap.set(td, base + '|' + occ);
+            });
+            return keyMap;
+        };
+        // 右パネル『開始時刻別』の並び（開始時刻昇順 → 同時刻はLength降順 → サービスタイプ順）
+        // 画面描画とCVP出力で並びがずれないよう、1箇所に置いて両方から使う
+        const sortTimeDataForPanel = (list) => {
+            const lengthValue = function (v) {
+                const n = parseFloat(v);
+                return isNaN(n) ? -Infinity : n;
+            };
+            return (list || []).slice().sort(function (a, b) {
+                if (a.timeMinutes !== b.timeMinutes) return a.timeMinutes - b.timeMinutes;
+                // 同じ開始時刻はLengthの長い順
+                const la = lengthValue(a.blockLength);
+                const lb = lengthValue(b.blockLength);
+                if (la !== lb) return lb - la;
+                return a.serviceType.localeCompare(b.serviceType);
+            });
+        };
         // SPR算出パネル用のSPR（Cycle × Length ごと / Block数に掛けてVolを算出）
         // 形式: { 'SSD_1': { '5': 60.9, '4.5': 51.8, ... }, ... }
         const getSprCalcLenSpr = () => {
@@ -443,6 +489,9 @@ function newFunction() {
         const saveSprCalcShowSetting = (v) => setStorage('dsp-spr-calc-show-setting', !!v);
         const sprSmallBtnStyle = (on) => 'padding:2px 6px;border-radius:3px;font-size:9px;font-weight:bold;cursor:pointer;white-space:nowrap;' +
             (on ? 'background:#00897B;border:1px solid #00695C;color:#fff;' : 'background:#fff;border:1px solid #ccc;color:#999;');
+        const cvpApplyBtnText = (on) => 'Core ' + (on ? 'ON' : 'OFF');
+        const cvpApplyBtnStyle = (on) => sprSmallBtnStyle(on) +
+            'width:100%;padding:1px 2px;box-sizing:border-box;line-height:1.2;';
         // ON にする直前のSPR（OFF で復元する）
         const getSprCalcMultBackup = () => getStorage('dsp-spr-calc-mult-backup', SSD_DEFAULTS);
         const saveSprCalcMultBackup = (v) => setStorage('dsp-spr-calc-mult-backup', v);
@@ -1038,7 +1087,7 @@ function newFunction() {
             const multipliers = getSSDMultipliers();
             const adjustments = getSSDAdjustments();
             const softAdjustments = getSSDSoftAdjustments();
-            const overrides = getC1C3Overrides();
+            const overrides = getEffectiveC1C3Overrides();
             const pct = getSoftPct();
             const hardPct = getHardPct();
             const subtract = true;
@@ -1104,12 +1153,10 @@ function newFunction() {
             if (input1B) {
                 const max1B = getFixedInputMax('SSD_1_B', currentSSDData, multipliers);
                 input1B.max = String(max1B);
-                input1B.title = 'Max: ' + max1B + '（受諾×SPR）';
             }
             if (input3B) {
                 const max3B = getFixedInputMax('SSD_3_B', currentSSDData, multipliers);
                 input3B.max = String(max3B);
-                input3B.title = 'Max: ' + max3B + '（受諾×SPR）';
             }
         };
 
@@ -1190,7 +1237,7 @@ function newFunction() {
             const multipliers = getSSDMultipliers();
             const adjustments = getSSDAdjustments();
             const softAdjustments = getSSDSoftAdjustments();
-            const overrides = getC1C3Overrides();
+            const overrides = getEffectiveC1C3Overrides();
             const pct = getSoftPct();
             const hardPct = getHardPct();
             const subtract = true;
@@ -1296,6 +1343,85 @@ function newFunction() {
             XLSX.writeFile(wb, fileName);
             showDownloadNotification(fileName);
         };
+
+        // === CVP(Adjust) 出力 ===
+        // Adjust（dsp-time-req-adjust の delta≠0）が入っている Block だけを CVP 形式で出力する。
+        // 必須台数は adjust 後の値（buildBlockMatrix と同じ Math.max(0, 必須+delta)）。
+        const downloadCvpAdjustExcel = () => {
+            // 1W / Fill の日付タブ巡回中は別日のデータを掴むので出力しない
+            if (isFutureRequiredDownloading) return;
+            if (!currentSSDData || !currentTimeDataList.length) {
+                alert('データがありません');
+                return;
+            }
+
+            const adjust = getTimeReqAdjust();        // delta=0 は normalize で落ちている
+            const adjKeyMap = buildTimeAdjKeyMap();   // td 参照 → 行キー
+            const rows = sortTimeDataForPanel(currentTimeDataList); // 画面『開始時刻別』と同じ並び
+
+            const selectedText = getSelectedDateText();
+            const baseDate = resolveBaseDateFromSelectedTab(selectedText);
+            const targetDate = formatYMD(baseDate);
+
+            const exportRows = [];
+            const suspect = []; // Cycle / Block Length が CVP 形式として不完全な行
+            rows.forEach(td => {
+                const delta = adjust[adjKeyMap.get(td)] || 0;
+                if (delta === 0) return; // 行の除外条件はこれだけ（Adjust 後が 0 台の行も出力する）
+                const req = Math.max(0, (td.required || 0) + delta);
+                const timeParts = getTimeParts(td.timeMinutes);
+                const cycle = td.cycle || '';
+                const len = (td.blockLength === '' || td.blockLength === undefined || td.blockLength === null)
+                    ? '' : Number(td.blockLength);
+                exportRows.push([
+                    targetDate,
+                    CVP_EXPORT_NODE,
+                    formatExportServiceType(td.serviceType),
+                    cycle,
+                    timeParts.start,
+                    timeParts.minute,
+                    len,
+                    req
+                ]);
+                if (!/^CYCLE/i.test(cycle) || len === '') {
+                    suspect.push(minutesToHHMM(td.timeMinutes) + ' / Cycle ' + (cycle || '(空)') +
+                        ' / Length ' + (len === '' ? '(空)' : len));
+                }
+            });
+
+            if (exportRows.length === 0) {
+                alert('Adjust された Block がありません。\n右パネルの Adjust に±台数を入力してから押してください。');
+                return;
+            }
+            if (suspect.length) {
+                alert('次の行は Cycle または Block Length が CVP 形式として不完全です。\n出力後にExcelを確認してください。\n\n' + suspect.join('\n'));
+            }
+
+            const wsData = [
+                [], // 1行目は空行（ヘッダは2行目 / データは3行目から）
+                ['Target Date', 'Node', 'Service Type', 'Cycle', 'Start', 'Time', 'Block Length', 'Required Number of Drivers'],
+                ...exportRows
+            ];
+
+            const wb = XLSX.utils.book_new();
+            const ws = XLSX.utils.aoa_to_sheet(wsData);
+            ws['!cols'] = [
+                { wch: 14 },
+                { wch: 10 },
+                { wch: 28 },
+                { wch: 12 },
+                { wch: 8 },
+                { wch: 8 },
+                { wch: 14 },
+                { wch: 28 }
+            ];
+            XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+
+            const fileName = 'SSD_cvp_adjust_' + formatFileYMD(baseDate) + '.xlsx';
+            XLSX.writeFile(wb, fileName);
+            showDownloadNotification(fileName);
+        };
+        // === /CVP(Adjust) 出力 ===
 
         const downloadFutureRequiredExcel = async () => {
             if (isFutureRequiredDownloading) return;
@@ -1668,7 +1794,7 @@ function newFunction() {
             const multipliers = getSSDMultipliers();
             const adjustments = getSSDAdjustments();
             const softAdjustments = getSSDSoftAdjustments();
-            const overrides = getC1C3Overrides();
+            const overrides = getEffectiveC1C3Overrides();
             const pct = getSoftPct();
             const subtract = true;
 
@@ -1718,7 +1844,7 @@ function newFunction() {
                 const isLast = (r.max === null);
                 rowsHtml +=
                     '<div style="' + GRID_COLS + 'padding:3px 0;' + (isC ? 'background:#fafafa;' : '') + '">' +
-                    '<input type="text" id="tr-' + k + '-name" value="' + escapeHtml(labels[k]) + '" maxlength="40" placeholder="' + k + '" title="' + k + '"' +
+                    '<input type="text" id="tr-' + k + '-name" value="' + escapeHtml(labels[k]) + '" maxlength="40" placeholder="' + k + '"' +
                     ' style="width:100%;padding:3px;border:1px solid ' + (isC ? '#ddd' : '#90CAF9') + ';border-radius:4px;text-align:center;font-size:11px;font-weight:bold;box-sizing:border-box;color:' + (isC ? '#888' : '#1565C0') + ';" />' +
                     '<input type="time" id="tr-' + k + '-min" value="' + minutesToHHMM(r.min) + '"' +
                     ' style="width:100%;padding:3px;border:1px solid #ccc;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;" />' +
@@ -1761,7 +1887,6 @@ function newFunction() {
                 '</div>' +
                 '<div style="margin-top:12px;padding-top:10px;border-top:1px solid #eee;">' +
                 '<a href="' + escapeHtml(SPR_TEMPLATE_URL) + '" rel="noopener noreferrer"' +
-                ' title="' + escapeHtml(SPR_TEMPLATE_NAME + ' をAmazon Driveからダウンロード') + '"' +
                 ' style="display:flex;align-items:center;justify-content:center;gap:6px;padding:7px;' +
                 'background:#fff;color:#00897B;border:1px solid #80CBC4;border-radius:5px;' +
                 'text-decoration:none;font-size:12px;font-weight:bold;box-sizing:border-box;">' +
@@ -1922,19 +2047,24 @@ function newFunction() {
         // =====================================================
         // === SPR算出パネル：Cycle × Length のBlock数
         // =====================================================
-        const buildBlockMatrix = (basis) => {
+        // useAdjust が真のときだけ 開始時刻別の必須 adjust を加算する（基準=必須のときのみ有効）
+        const buildBlockMatrix = (basis, useAdjust) => {
             const keys = SPR_LIST;
             const map = {};
             keys.forEach(k => { map[k] = {}; });
+
+            const applyAdjust = !!useAdjust && basis !== 'accepted';
+            const adjust = applyAdjust ? getTimeReqAdjust() : null;
+            const adjKeyMap = applyAdjust ? buildTimeAdjKeyMap() : null;
 
             const lenSet = {};
             (currentTimeDataList || []).forEach(td => {
                 const k = td.ssdGroup;
                 if (!k || !map[k]) return;
-                const lenKey = (td.blockLength === '' || td.blockLength === undefined || td.blockLength === null)
-                    ? '-' : String(td.blockLength);
+                const lenKey = lenKeyOf(td);
                 lenSet[lenKey] = true;
-                const v = basis === 'accepted' ? (td.accepted || 0) : (td.required || 0);
+                let v = basis === 'accepted' ? (td.accepted || 0) : (td.required || 0);
+                if (applyAdjust) v = Math.max(0, v + (adjust[adjKeyMap.get(td)] || 0));
                 map[k][lenKey] = (map[k][lenKey] || 0) + v;
             });
 
@@ -1947,6 +2077,20 @@ function newFunction() {
             return { keys, lengths, map };
         };
 
+        // === adjust Vol Gap 計算（純関数 / 検証用に自己完結）===
+        const computeAdjGapRow = (blocksByLen, sprByLen, lengths, cvp) => {
+            let blocks = 0, vol = 0;
+            lengths.forEach(l => {
+                const b = blocksByLen[l] || 0;
+                blocks += b;
+                vol += b * (sprByLen[l] || 0);
+            });
+            const spr = blocks > 0 ? Math.round((vol / blocks) * 10) / 10 : 0;
+            const volume = Math.round(spr * blocks);
+            return { blocks: blocks, spr: spr, volume: volume, gap: volume - (cvp || 0) };
+        };
+        // === /adjust Vol Gap 計算 ===
+
         let isApplyingDerivedSpr = false;
 
         // bodyEl を渡すと未アタッチ状態でも描画できる
@@ -1954,13 +2098,15 @@ function newFunction() {
             const body = bodyEl || document.getElementById('spr-calc-body');
             if (!body) return;
 
-            const NAME_W = 72, SUM_W = 54, LEN_W = 54;
+            const NAME_W = 72, SUM_W = 54, LEN_W = 54, GAP_W = 70, ADJ_W = 78;
             const panelEl = body.parentElement && body.parentElement.id === 'dsp-spr-calc-panel'
                 ? body.parentElement
                 : document.getElementById('dsp-spr-calc-panel');
 
             const basis = getSprCalcBasis();
             const { keys, lengths, map } = buildBlockMatrix(basis);
+            // adjust 反映後のBlock数（lengths は base と同じ構成になる）
+            const adjMatrix = buildBlockMatrix(basis, true);
 
             if (lengths.length === 0) {
                 body.innerHTML = '<div style="font-size:11px;color:#999;padding:10px 2px;">データなし</div>';
@@ -1973,7 +2119,9 @@ function newFunction() {
             const cols = 'display:grid;grid-template-columns:' + NAME_W + 'px ' + SUM_W + 'px repeat(' + lengths.length + ',' + LEN_W + 'px);gap:1px;';
             const cellBase = 'padding:3px 3px;font-size:10px;text-align:right;box-sizing:border-box;';
             const nameCell = cellBase + 'text-align:left;background:#e3f2fd;font-weight:bold;color:#1565C0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-            const gridWidth = NAME_W + SUM_W + lengths.length * (LEN_W + 1) + 1;
+            const gridWidth = Math.max(
+                NAME_W + SUM_W + lengths.length * (LEN_W + 1) + 1,
+                NAME_W + SUM_W + 4 * GAP_W + ADJ_W + 6);
             const lengthHeader = (bg) => lengths.map(l => '<span style="' + cellBase + 'background:' + bg + ';color:#555;text-align:center;">' + (l === '-' ? '-' : l + 'h') + '</span>').join('');
             const totalRow = (label, sumText, cellTexts) => '<div style="' + cols + 'margin-top:2px;border-top:2px solid #eee;">' +
                 '<span style="' + cellBase + 'text-align:left;font-weight:bold;color:#333;">' + label + '</span>' +
@@ -2043,7 +2191,7 @@ function newFunction() {
 
                 html += '<div style="' + cols + 'font-weight:bold;">' +
                     '<span></span>' +
-                    '<span style="' + cellBase + 'background:#fff59d;color:#333;" title="参照ファイル ActSPRシートのSPR列">SPR</span>' +
+                    '<span style="' + cellBase + 'background:#fff59d;color:#333;">SPR</span>' +
                     lengthHeader('#fbe9e7') +
                     '</div>';
 
@@ -2052,7 +2200,7 @@ function newFunction() {
                     const actTotal = actSprTotal[k] || 0;
 
                     html += '<div style="' + cols + 'align-items:center;">' +
-                        '<span style="' + nameCell + '" title="' + escapeHtml(ssdLabel(k)) + '">' + escapeHtml(ssdLabel(k)) + '</span>' +
+                        '<span style="' + nameCell + '">' + escapeHtml(ssdLabel(k)) + '</span>' +
                         '<span style="' + cellBase + 'font-weight:bold;background:#fffde7;color:' + (actTotal > 0 ? '#E64A19' : '#bbb') + ';">' + (actTotal > 0 ? actTotal.toFixed(1) : '-') + '</span>' +
                         lengths.map(l => '<input type="number" class="sprcalc-spr-cell" data-k="' + k + '" data-l="' + escapeHtml(l) + '"' +
                         ' value="' + (sprRow[l] !== undefined ? sprRow[l] : '') + '" step="0.1" min="0" max="9999" placeholder="-"' +
@@ -2064,22 +2212,22 @@ function newFunction() {
             // ---- Volume / CVP Vol / Vol Gap ----
             const cvpVol = getCvpVol();
             const applyOn = getSprCalcApply();
-            const GAP_W = 70;
-            const gapCols = 'display:grid;grid-template-columns:' + NAME_W + 'px ' + SUM_W + 'px repeat(4,' + GAP_W + 'px);gap:1px;';
+            const gapCols = 'display:grid;grid-template-columns:' + NAME_W + 'px ' + SUM_W + 'px repeat(4,' + GAP_W + 'px) ' + ADJ_W + 'px;gap:1px;';
 
             html += sectionHeader('Volume / CVP Vol',
-                '<button id="sprcalc-apply-toggle" title="算出SPRを左パネルのSPRへ反映" style="' + sprSmallBtnStyle(applyOn) + '">SPR反映 ' + (applyOn ? 'ON' : 'OFF') + '</button>',
+                '<button id="sprcalc-apply-toggle" style="' + sprSmallBtnStyle(applyOn) + '">SPR反映 ' + (applyOn ? 'ON' : 'OFF') + '</button>',
                 !showSetting);
             html += '<div style="' + gapCols + 'font-weight:bold;">' +
                 '<span></span>' +
-                '<span style="' + cellBase + 'background:#fff59d;color:#333;" title="Vol合計 ÷ Block数合計">SPR</span>' +
-                '<span style="' + cellBase + 'background:#fbe9e7;color:#555;" title="Block数合計 × SPR">Volume</span>' +
-                '<span style="' + cellBase + 'background:#fbe9e7;color:#555;" title="参照ファイル 19〜24行目">CVP Vol</span>' +
-                '<span style="' + cellBase + 'background:#fbe9e7;color:#555;" title="Volume − CVP Vol">Vol Gap</span>' +
-                '<span style="' + cellBase + 'background:#fbe9e7;color:#555;" title="Vol Gap ÷ SPR（Block数換算）">Gap/SPR</span>' +
+                '<span style="' + cellBase + 'background:#fff59d;color:#333;">SPR</span>' +
+                '<span style="' + cellBase + 'background:#fbe9e7;color:#555;">Volume</span>' +
+                '<span style="' + cellBase + 'background:#fbe9e7;color:#555;">CVP Vol</span>' +
+                '<span style="' + cellBase + 'background:#fbe9e7;color:#555;">Vol Gap</span>' +
+                '<span style="' + cellBase + 'background:#fbe9e7;color:#555;">Gap/SPR</span>' +
+                '<span style="' + cellBase + 'background:#fbe9e7;color:#555;white-space:normal;line-height:1.1;">adjust Vol Gap</span>' +
                 '</div>';
 
-            let volumeGrand = 0, cvpVolGrand = 0;
+            let volumeGrand = 0, cvpVolGrand = 0, adjVolumeGrand = 0;
 
             keys.forEach(k => {
                 const spr = Math.round(derivedSprOf(k) * 10) / 10;
@@ -2087,20 +2235,24 @@ function newFunction() {
                 const volume = Math.round(spr * blocks);
                 const cvp = cvpVol[k] || 0;
                 const gap = volume - cvp;
+                const adj = computeAdjGapRow(adjMatrix.map[k] || {}, sprMap[k] || {}, lengths, cvp);
                 volumeGrand += volume;
                 cvpVolGrand += cvp;
+                adjVolumeGrand += adj.volume;
 
                 html += '<div style="' + gapCols + '">' +
-                    '<span style="' + nameCell + '" title="' + escapeHtml(ssdLabel(k)) + '">' + escapeHtml(ssdLabel(k)) + '</span>' +
+                    '<span style="' + nameCell + '">' + escapeHtml(ssdLabel(k)) + '</span>' +
                     '<span style="' + cellBase + 'font-weight:bold;background:#fffde7;color:' + (spr > 0 ? '#E64A19' : '#bbb') + ';">' + (spr > 0 ? spr.toFixed(1) : '-') + '</span>' +
-                    '<span style="' + cellBase + 'font-weight:bold;color:#333;border:1px solid #eee;" title="' + blocks + ' × ' + spr.toFixed(1) + '">' + volume + '</span>' +
+                    '<span style="' + cellBase + 'font-weight:bold;color:#333;border:1px solid #eee;">' + volume + '</span>' +
                     '<span style="' + cellBase + 'color:#333;border:1px solid #eee;">' + (cvp > 0 ? cvp : '-') + '</span>' +
                     '<span style="' + cellBase + 'font-weight:bold;background:' + (cvp > 0 ? (gap < 0 ? '#ffebee' : '#e8f5e9') : '#fafafa') + ';color:' + (cvp > 0 ? (gap < 0 ? '#c62828' : '#2e7d32') : '#bbb') + ';">' + (cvp > 0 ? (gap > 0 ? '+' + gap : gap) : '-') + '</span>' +
                     '<span style="' + cellBase + 'background:' + (cvp > 0 && spr > 0 ? (gap < 0 ? '#ffebee' : '#e8f5e9') : '#fafafa') + ';color:' + (cvp > 0 && spr > 0 ? (gap < 0 ? '#c62828' : '#2e7d32') : '#bbb') + ';">' + (cvp > 0 && spr > 0 ? formatSigned1(gap / spr) : '-') + '</span>' +
+                    '<span style="' + cellBase + 'font-weight:bold;background:' + (cvp > 0 ? (adj.gap < 0 ? '#ffebee' : '#e8f5e9') : '#fafafa') + ';color:' + (cvp > 0 ? (adj.gap < 0 ? '#c62828' : '#2e7d32') : '#bbb') + ';">' + (cvp > 0 ? (adj.gap > 0 ? '+' + adj.gap : adj.gap) : '-') + '</span>' +
                     '</div>';
             });
 
             const gapGrand = volumeGrand - cvpVolGrand;
+            const adjGapGrand = adjVolumeGrand - cvpVolGrand;
             html += '<div style="' + gapCols + 'margin-top:2px;border-top:2px solid #eee;">' +
                 '<span style="' + cellBase + 'text-align:left;font-weight:bold;color:#333;">合計</span>' +
                 '<span style="' + cellBase + 'background:#fffde7;">' + (blockGrandTotal > 0 ? (volumeGrand / blockGrandTotal).toFixed(1) : '-') + '</span>' +
@@ -2108,6 +2260,7 @@ function newFunction() {
                 '<span style="' + cellBase + 'font-weight:bold;color:#333;background:#fffde7;">' + (cvpVolGrand > 0 ? cvpVolGrand : '-') + '</span>' +
                 '<span style="' + cellBase + 'font-weight:bold;background:#fffde7;color:' + (cvpVolGrand > 0 ? (gapGrand < 0 ? '#c62828' : '#2e7d32') : '#bbb') + ';">' + (cvpVolGrand > 0 ? (gapGrand > 0 ? '+' + gapGrand : gapGrand) : '-') + '</span>' +
                 '<span style="' + cellBase + 'background:#fffde7;color:' + (cvpVolGrand > 0 ? (gapGrand < 0 ? '#c62828' : '#2e7d32') : '#bbb') + ';">' + (cvpVolGrand > 0 && volumeGrand > 0 && blockGrandTotal > 0 ? formatSigned1(gapGrand / (volumeGrand / blockGrandTotal)) : '-') + '</span>' +
+                '<span style="' + cellBase + 'font-weight:bold;background:#fffde7;color:' + (cvpVolGrand > 0 ? (adjGapGrand < 0 ? '#c62828' : '#2e7d32') : '#bbb') + ';">' + (cvpVolGrand > 0 ? (adjGapGrand > 0 ? '+' + adjGapGrand : adjGapGrand) : '-') + '</span>' +
                 '</div>';
 
             // ---- Block数 ----
@@ -2122,7 +2275,7 @@ function newFunction() {
                 const row = map[k] || {};
 
                 html += '<div style="' + cols + '">' +
-                    '<span style="' + nameCell + '" title="' + escapeHtml(ssdLabel(k)) + '">' + escapeHtml(ssdLabel(k)) + '</span>' +
+                    '<span style="' + nameCell + '">' + escapeHtml(ssdLabel(k)) + '</span>' +
                     '<span style="' + cellBase + 'font-weight:bold;color:#333;border:1px solid #eee;">' + (blockRowTotals[k] || 0) + '</span>' +
                     lengths.map(l => {
                         const v = row[l] || 0;
@@ -2156,7 +2309,7 @@ function newFunction() {
                 const volRow = volMap[k] || {};
 
                 html += '<div style="' + cols + '">' +
-                    '<span style="' + nameCell + '" title="' + escapeHtml(ssdLabel(k)) + '">' + escapeHtml(ssdLabel(k)) + '</span>' +
+                    '<span style="' + nameCell + '">' + escapeHtml(ssdLabel(k)) + '</span>' +
                     '<span style="' + cellBase + 'font-weight:bold;color:#333;border:1px solid #eee;">' + Math.round(volRowTotals[k] || 0) + '</span>' +
                     lengths.map(l => {
                         const vol = volRow[l] || 0;
@@ -2377,7 +2530,7 @@ function newFunction() {
             const multipliers = getSSDMultipliers();
             const adjustments = getSSDAdjustments();
             const softAdjustments = getSSDSoftAdjustments();
-            const overrides = getC1C3Overrides();
+            const overrides = getEffectiveC1C3Overrides();
             const pct = getSoftPct();
             const hardPct = getHardPct();
             const subtract = true;
@@ -2387,7 +2540,7 @@ function newFunction() {
                 const sk2 = SPR_LIST[si];
                 sprInputRows +=
                     '<div style="display:grid;grid-template-columns:54px 1fr 1fr 1fr;gap:4px;align-items:center;margin:4px 0;">' +
-                    '<label style="font-size:11px;color:#555;font-weight:bold;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(ssdLabel(sk2)) + '">' + escapeHtml(ssdLabel(sk2)) + '</label>' +
+                    '<label style="font-size:11px;color:#555;font-weight:bold;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(ssdLabel(sk2)) + '</label>' +
                     '<input type="number" id="mult-' + sk2 + '" value="' + (multipliers[sk2] || 1).toFixed(1) + '" step="0.1" min="0" max="100"' +
                     ' style="width:100%;padding:4px;border:1px solid #ccc;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;" />' +
                     '<input type="number" id="adj-' + sk2 + '" value="' + (adjustments[sk2] || 0) + '" step="1" min="-999" max="999"' +
@@ -2418,7 +2571,7 @@ function newFunction() {
 
                 ssdRowsHtml +=
                     '<div style="display:grid;grid-template-columns:80px 60px 70px 70px 70px;gap:6px;margin:3px 0;padding:8px;background:' + (sk === 'SSD_C1' || sk === 'SSD_C3' ? '#f0f8ff' : '#e3f2fd') + ';border-radius:3px;align-items:center;">' +
-                    '<span style="font-weight:bold;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(ssdLabel(sk)) + '">' + escapeHtml(ssdLabel(sk)) + '</span>' +
+                    '<span style="font-weight:bold;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(ssdLabel(sk)) + '</span>' +
                     '<span style="color:#FF9800;font-weight:bold;text-align:center;">' + (sk === 'SSD_C1' || sk === 'SSD_C3' ? '-' : d.required) + '</span>' +
                     '<span id="cell-acc-' + sk + '" style="color:#4CAF50;font-weight:bold;text-align:center;">' + (sk === 'SSD_C1' || sk === 'SSD_C3' ? '-' : d.accepted + formatAdjustment(adj)) + '</span>' +
                     '<span id="cell-soft-' + sk + '" style="color:#2196F3;font-weight:bold;text-align:center;">' + soft + '</span>' +
@@ -2436,18 +2589,7 @@ function newFunction() {
                 '</div>';
 
             // ---- 右パネル：開始時刻別 ----
-            const lengthValue = function (v) {
-                const n = parseFloat(v);
-                return isNaN(n) ? -Infinity : n;
-            };
-            const sortedTimeData = currentTimeDataList.slice().sort(function (a, b) {
-                if (a.timeMinutes !== b.timeMinutes) return a.timeMinutes - b.timeMinutes;
-                // 同じ開始時刻はLengthの長い順
-                const la = lengthValue(a.blockLength);
-                const lb = lengthValue(b.blockLength);
-                if (la !== lb) return lb - la;
-                return a.serviceType.localeCompare(b.serviceType);
-            });
+            const sortedTimeData = sortTimeDataForPanel(currentTimeDataList);
 
             // 同じ開始時刻ごとの必須合計（Yard capacity 超過判定用）
             const yardCapacity = getYardCapacity();
@@ -2457,28 +2599,63 @@ function newFunction() {
                 requiredByTime[key] = (requiredByTime[key] || 0) + (sortedTimeData[ri].required || 0);
             }
 
-            let timeRowsHtml = sortedTimeData.length === 0 ? '<div style="color:#666;padding:10px;">データなし</div>' : '';
-            for (let ti = 0; ti < sortedTimeData.length; ti++) {
-                const td = sortedTimeData[ti];
-                const lengthText = (td.blockLength === '' || td.blockLength === undefined || td.blockLength === null) ? '-' : td.blockLength;
-                const timeTotal = requiredByTime[td.timeMinutes] || 0;
-                const isOver = timeTotal > yardCapacity;
-                const rowStyle = isOver
-                    ? 'background:#ffebee;border-left:3px solid #f44336;'
-                    : 'background:#f5f5f5;';
-                const cycleLabel = td.ssdGroup ? ssdLabel(td.ssdGroup) : '-';
-                const timeText24 = minutesToHHMM(td.timeMinutes);
-                timeRowsHtml +=
-                    '<div style="display:grid;grid-template-columns:60px 44px 132px 40px 38px 38px;gap:6px;margin:3px 0;padding:6px 8px;' + rowStyle + 'border-radius:3px;align-items:center;"' +
-                    (isOver ? ' title="' + timeText24 + ' の必須合計 ' + timeTotal + ' (Yard capacity ' + yardCapacity + ' 超過)"' : '') + '>' +
-                    '<span style="font-size:10px;font-weight:bold;color:#1565C0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(cycleLabel) + '">' + escapeHtml(cycleLabel) + '</span>' +
-                    '<span style="font-weight:bold;font-size:11px;white-space:nowrap;">' + timeText24 + '</span>' +
-                    '<span style="font-size:10px;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + td.serviceType + '">' + getShortServiceType(td.serviceType) + '</span>' +
-                    '<span style="color:#795548;font-weight:bold;text-align:center;font-size:11px;">' + lengthText + '</span>' +
-                    '<span style="color:#FF9800;font-weight:bold;text-align:center;">' + td.required + '</span>' +
-                    '<span style="color:#4CAF50;font-weight:bold;text-align:center;">' + td.accepted + '</span>' +
-                    '</div>';
-            }
+            // 必須のadjust（行ごと / SPR算出パネルのBlock数にのみ反映）
+            const timeAdjKeyMap = buildTimeAdjKeyMap();
+
+            // === 開始時刻別パネル描画 ===
+            const buildTimePanelHtml = (showAdjust) => {
+                // 再描画のたびに最新値を読む（トグルで入力値が消えないように）
+                const timeAdjValues = getTimeReqAdjust();
+                const timeGridCols = showAdjust
+                    ? '60px 44px 132px 40px 38px 38px 42px'
+                    : '60px 44px 132px 40px 38px 38px';
+                let timeRowsHtml = sortedTimeData.length === 0 ? '<div style="color:#666;padding:10px;">データなし</div>' : '';
+                for (let ti = 0; ti < sortedTimeData.length; ti++) {
+                    const td = sortedTimeData[ti];
+                    const lengthText = (td.blockLength === '' || td.blockLength === undefined || td.blockLength === null) ? '-' : td.blockLength;
+                    const timeTotal = requiredByTime[td.timeMinutes] || 0;
+                    const isOver = timeTotal > yardCapacity;
+                    const rowStyle = isOver
+                        ? 'background:#ffebee;border-left:3px solid #f44336;'
+                        : 'background:#f5f5f5;';
+                    const cycleLabel = td.ssdGroup ? ssdLabel(td.ssdGroup) : '-';
+                    const timeText24 = minutesToHHMM(td.timeMinutes);
+                    const adjRowKey = timeAdjKeyMap.get(td) || '';
+                    const adjRowVal = timeAdjValues[adjRowKey] || 0;
+                    timeRowsHtml +=
+                        '<div style="display:grid;grid-template-columns:' + timeGridCols + ';gap:6px;margin:3px 0;padding:6px 8px;' + rowStyle + 'border-radius:3px;align-items:center;">' +
+                        '<span style="font-size:10px;font-weight:bold;color:#1565C0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(cycleLabel) + '</span>' +
+                        '<span style="font-weight:bold;font-size:11px;white-space:nowrap;">' + timeText24 + '</span>' +
+                        '<span style="font-size:10px;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + getShortServiceType(td.serviceType) + '</span>' +
+                        '<span style="color:#795548;font-weight:bold;text-align:center;font-size:11px;">' + lengthText + '</span>' +
+                        '<span style="color:#FF9800;font-weight:bold;text-align:center;">' + td.required + '</span>' +
+                        '<span style="color:#4CAF50;font-weight:bold;text-align:center;">' + td.accepted + '</span>' +
+                        (showAdjust
+                            ? '<input type="number" class="dsp-time-adj" data-key="' + escapeHtml(adjRowKey) + '"' +
+                            ' value="' + (adjRowVal ? adjRowVal : '') + '" step="1" min="-999" max="999" placeholder="±0"' +
+                            ' style="width:100%;padding:2px;border:1px solid #90CAF9;border-radius:3px;text-align:center;font-size:10px;box-sizing:border-box;color:#2196F3;font-weight:bold;" />'
+                            : '') +
+                        '</div>';
+                }
+
+                const clearBtnHtml = showAdjust
+                    ? '<button id="time-adj-clear" style="margin-left:8px;padding:1px 6px;background:#fff;border:1px solid #ccc;border-radius:3px;font-size:9px;font-weight:bold;color:#666;cursor:pointer;vertical-align:middle;white-space:nowrap;">Adjustクリア</button>'
+                    : '';
+                const cvpBtnHtml = showAdjust
+                    ? '<button id="time-adj-cvp" style="margin-left:8px;padding:1px 6px;background:#fff;border:1px solid #ccc;border-radius:3px;font-size:9px;font-weight:bold;color:#666;cursor:pointer;vertical-align:middle;white-space:nowrap;">CVP</button>'
+                    : '';
+
+                // 見出し行とヘッダ行は sticky で固定（データ行だけがスクロールする）
+                return '<div style="position:sticky;top:0;z-index:1;background:#fff;padding-top:6px;padding-bottom:2px;">' +
+                    sectionTitle('開始時刻別' + clearBtnHtml + cvpBtnHtml, '#4CAF50') +
+                    '<div style="display:grid;grid-template-columns:' + timeGridCols + ';gap:6px;padding:3px 8px;font-weight:bold;color:#666;font-size:10px;">' +
+                    '<span>Cycle</span><span>開始時刻</span><span>サービスタイプ</span><span style="text-align:center;">Length</span><span style="text-align:center;">必須</span><span style="text-align:center;">受諾</span>' +
+                    (showAdjust ? '<span style="text-align:center;">Adjust</span>' : '') +
+                    '</div>' +
+                    '</div>' +
+                    timeRowsHtml;
+            };
+            // === /開始時刻別パネル描画 ===
 
             // ---- サマリー ----
             const diff = totalAccepted - totalRequired;
@@ -2497,10 +2674,8 @@ function newFunction() {
             const vcReqTotal = vanReq + carReq;
             const vcAccTotal = vanAcc + carAcc;
             const ratioText = (v, t) => (t > 0 ? (v / t * 100).toFixed(1) + '%' : '-');
-            const vanCarTitle = '必須 Van ' + vanReq + ' / Car ' + carReq + ' (計 ' + vcReqTotal + ')　'
-                + '受諾 Van ' + vanAcc + ' / Car ' + carAcc + ' (計 ' + vcAccTotal + ')';
             const vanCarHtml =
-                '<div style="display:grid;grid-template-columns:1fr auto;align-items:center;margin:4px 0;" title="' + escapeHtml(vanCarTitle) + '">' +
+                '<div style="display:grid;grid-template-columns:1fr auto;align-items:center;margin:4px 0;">' +
                 '<span style="font-size:11px;color:#666;">必須 Van <strong style="color:#1565C0;">' + ratioText(vanReq, vcReqTotal) + '</strong> / Car <strong style="color:#EF6C00;">' + ratioText(carReq, vcReqTotal) + '</strong></span>' +
                 '<span style="font-size:11px;color:#666;">受諾 Van <strong style="color:#1565C0;">' + ratioText(vanAcc, vcAccTotal) + '</strong> / Car <strong style="color:#EF6C00;">' + ratioText(carAcc, vcAccTotal) + '</strong></span>' +
                 '</div>';
@@ -2510,6 +2685,7 @@ function newFunction() {
             const pctLabelColor = pct > 0 ? '#2196F3' : '#f44336';
 
             // ---- 左パネル：CVP入力フィールド (4項目) ----
+            const cvpApplyOn = getCvpApplyEnabled();
             const storedOv = getC1C3Overrides();
             const valC1_1 = storedOv['SSD_C1_1'] || 0;
             const valC1_1B = storedOv['SSD_C1_1B'] || 0;
@@ -2524,23 +2700,25 @@ function newFunction() {
             overrides['SSD_C3'] = valC3_3B + valC3_4;
             const c1c3InputHtml =
                 '<div style="display:grid;grid-template-columns:60px 1fr 1fr;gap:2px 4px;align-items:center;">' +
-                '<span></span><span style="text-align:center;font-size:9px;color:#9C27B0;font-weight:bold;">CVP</span><span style="text-align:center;font-size:9px;color:#f44336;font-weight:bold;">Buffer</span>' +
-                '<label style="font-size:10px;color:#555;font-weight:bold;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(ssdLabel('SSD_1')) + '">' + escapeHtml(ssdLabel('SSD_1')) + '</label>' +
+                '<button id="cvp-apply-toggle" style="' + cvpApplyBtnStyle(cvpApplyOn) + '">' + cvpApplyBtnText(cvpApplyOn) + '</button>' +
+                '<span style="text-align:center;font-size:9px;color:#9C27B0;font-weight:bold;">CVP</span>' +
+                '<span style="text-align:center;font-size:9px;color:#f44336;font-weight:bold;">Buffer</span>' +
+                '<label style="font-size:10px;color:#555;font-weight:bold;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(ssdLabel('SSD_1')) + '</label>' +
                 '<input type="number" id="cvp-SSD_C1_1" value="' + valC1_1 + '" step="1" min="0" max="9999"' +
                 ' style="width:100%;padding:4px;border:2px solid #CE93D8;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;color:#9C27B0;font-weight:bold;" />' +
                 '<input type="number" id="cvp-buf-1" value="' + cvpBuf1 + '" step="1" min="-999" max="999"' +
                 ' style="width:100%;padding:4px;border:2px solid #ffcdd2;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;color:#f44336;font-weight:bold;" />' +
-                '<label style="font-size:10px;color:#555;font-weight:bold;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(ssdLabel('SSD_1_B')) + '">' + escapeHtml(ssdLabel('SSD_1_B')) + '</label>' +
+                '<label style="font-size:10px;color:#555;font-weight:bold;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(ssdLabel('SSD_1_B')) + '</label>' +
                 '<input type="number" id="cvp-SSD_C1_1B" value="' + valC1_1B + '" step="1" min="0" max="9999"' +
                 ' style="width:100%;padding:4px;border:2px solid #CE93D8;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;color:#9C27B0;font-weight:bold;" />' +
                 '<input type="number" id="cvp-buf-1b" value="' + cvpBuf1B + '" step="1" min="-999" max="999"' +
                 ' style="width:100%;padding:4px;border:2px solid #ffcdd2;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;color:#f44336;font-weight:bold;" />' +
-                '<label style="font-size:10px;color:#555;font-weight:bold;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(ssdLabel('SSD_3_B')) + '">' + escapeHtml(ssdLabel('SSD_3_B')) + '</label>' +
+                '<label style="font-size:10px;color:#555;font-weight:bold;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(ssdLabel('SSD_3_B')) + '</label>' +
                 '<input type="number" id="cvp-SSD_C3_3B" value="' + valC3_3B + '" step="1" min="0" max="9999"' +
                 ' style="width:100%;padding:4px;border:2px solid #CE93D8;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;color:#9C27B0;font-weight:bold;" />' +
                 '<input type="number" id="cvp-buf-3b" value="' + cvpBuf3B + '" step="1" min="-999" max="999"' +
                 ' style="width:100%;padding:4px;border:2px solid #ffcdd2;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;color:#f44336;font-weight:bold;" />' +
-                '<label style="font-size:10px;color:#555;font-weight:bold;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(ssdLabel('SSD_4')) + '">' + escapeHtml(ssdLabel('SSD_4')) + '</label>' +
+                '<label style="font-size:10px;color:#555;font-weight:bold;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(ssdLabel('SSD_4')) + '</label>' +
                 '<input type="number" id="cvp-SSD_C3_4" value="' + valC3_4 + '" step="1" min="0" max="9999"' +
                 ' style="width:100%;padding:4px;border:2px solid #CE93D8;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;color:#9C27B0;font-weight:bold;" />' +
                 '<input type="number" id="cvp-buf-4" value="' + cvpBuf4 + '" step="1" min="-999" max="999"' +
@@ -2607,7 +2785,7 @@ function newFunction() {
                 '</div>' +
                 '<div style="display:grid;grid-template-columns:1fr auto;align-items:center;margin:4px 0;">' +
                 '<span>受諾済み: <strong style="color:#2e7d32;">' + totalAccepted + '</strong>' +
-                '<span style="margin-left:8px;font-size:11px;color:#666;" title="受諾済み ' + totalAccepted + ' / 必須合計 ' + totalRequired + '">Fill Rate: <strong style="color:' + fillRateColor + ';">' + fillRateText + '</strong></span>' +
+                '<span style="margin-left:8px;font-size:11px;color:#666;">Fill Rate: <strong style="color:' + fillRateColor + ';">' + fillRateText + '</strong></span>' +
                 '</span>' +
                 '<span style="font-size:11px;color:#666;">Soft: <strong id="summary-soft-acc" style="color:#2196F3;">' + softTotals.fromAccepted + '</strong></span>' +
                 '</div>' +
@@ -2626,21 +2804,59 @@ function newFunction() {
                 '</div>' +
                 ssdRowsHtml +
                 '<div style="padding-top:10px;border-top:1px solid #ddd;display:flex;gap:6px;">' +
-                '<button id="dl-btn" title="' + escapeHtml(DL_TIP_CAPS) + '" style="flex:5;padding:5px;background:#4CAF50;color:white;border:none;border-radius:5px;cursor:pointer;font-size:12px;font-weight:bold;">Cap Set File</button>' +
-                '<button id="dl-fill-btn" title="' + escapeHtml(DL_TIP_FILL) + '" style="flex:1;padding:5px;background:#FF9800;color:white;border:none;border-radius:5px;cursor:pointer;font-size:11px;font-weight:bold;white-space:nowrap;">Fill</button>' +
-                '<button id="dl-1d-btn" title="' + escapeHtml(DL_TIP_1D) + '" style="flex:1;padding:5px;background:#1E88E5;color:white;border:none;border-radius:5px;cursor:pointer;font-size:11px;font-weight:bold;white-space:nowrap;">1D</button>' +
-                '<button id="dl-future-req-btn" title="' + escapeHtml(DL_TIP_1W) + '" style="flex:1;padding:5px;background:#1E88E5;color:white;border:none;border-radius:5px;cursor:pointer;font-size:11px;font-weight:bold;white-space:nowrap;">1W</button>' +
+                '<button id="dl-btn" style="flex:5;padding:5px;background:#4CAF50;color:white;border:none;border-radius:5px;cursor:pointer;font-size:12px;font-weight:bold;">Cap Set File</button>' +
+                '<button id="dl-fill-btn" style="flex:1;padding:5px;background:#FF9800;color:white;border:none;border-radius:5px;cursor:pointer;font-size:11px;font-weight:bold;white-space:nowrap;">Fill</button>' +
+                '<button id="dl-1d-btn" style="flex:1;padding:5px;background:#1E88E5;color:white;border:none;border-radius:5px;cursor:pointer;font-size:11px;font-weight:bold;white-space:nowrap;">1D</button>' +
+                '<button id="dl-future-req-btn" style="flex:1;padding:5px;background:#1E88E5;color:white;border:none;border-radius:5px;cursor:pointer;font-size:11px;font-weight:bold;white-space:nowrap;">1W</button>' +
                 '</div>';
 
             // 右パネル
             const rightPanel = document.createElement('div');
-            rightPanel.style.cssText = 'width:420px;min-width:420px;padding:6px 8px;overflow-y:auto;overflow-x:hidden;box-sizing:border-box;';
-            rightPanel.innerHTML =
-                sectionTitle('開始時刻別', '#4CAF50') +
-                '<div style="display:grid;grid-template-columns:60px 44px 132px 40px 38px 38px;gap:6px;margin-bottom:5px;padding:3px 8px;font-weight:bold;color:#666;font-size:10px;">' +
-                '<span>Cycle</span><span>開始時刻</span><span>サービスタイプ</span><span style="text-align:center;">Length</span><span style="text-align:center;">必須</span><span style="text-align:center;">受諾</span>' +
-                '</div>' +
-                timeRowsHtml;
+            // 上部 6px の padding は sticky ラッパー側に持たせる（固定部の上に行が透けないようにする）
+            // width は renderTimePanel() が Adjust 列の有無に合わせて設定する
+            // position:relative;z-index:0 で右パネルを独立したスタッキングコンテキストにする（sticky ヘッダの z-index を右パネル内に閉じ込め、box 直下の × / v表示 / Cycle設定 と競合させない）
+            rightPanel.style.cssText = 'position:relative;z-index:0;padding:0 8px 6px;overflow-y:auto;overflow-x:hidden;box-sizing:border-box;';
+
+            // 開始時刻別の必須 adjust（SPR算出パネルのみ再描画）
+            const bindTimePanelEvents = function () {
+                rightPanel.querySelectorAll('.dsp-time-adj').forEach(function (el) {
+                    el.addEventListener('change', function () {
+                        const key = this.getAttribute('data-key');
+                        if (!key) return;
+                        const values = getTimeReqAdjust();
+                        const raw = String(this.value).trim();
+                        const v = raw === '' ? 0 : normalizeTimeAdjDelta(raw);
+                        if (v === 0) {
+                            delete values[key];
+                            this.value = '';
+                        } else {
+                            values[key] = v;
+                            this.value = String(v);
+                        }
+                        saveTimeReqAdjust(values);
+                        renderSprCalcBody();
+                    });
+                });
+
+                rightPanel.querySelector('#time-adj-clear')?.addEventListener('click', function () {
+                    saveTimeReqAdjust({});
+                    rightPanel.querySelectorAll('.dsp-time-adj').forEach(function (el) { el.value = ''; });
+                    renderSprCalcBody();
+                });
+
+                rightPanel.querySelector('#time-adj-cvp')?.addEventListener('click', downloadCvpAdjustExcel);
+            };
+
+            // Adjust 列（+ Adjustクリア）は SPR算出パネルが開いているときだけ出力する
+            const renderTimePanel = function () {
+                const showAdjust = getSprCalcPanelOpen();
+                rightPanel.innerHTML = buildTimePanelHtml(showAdjust);
+                const w = showAdjust ? 470 : 420;
+                rightPanel.style.width = w + 'px';
+                rightPanel.style.minWidth = w + 'px';
+                bindTimePanelEvents();
+            };
+            renderTimePanel();
 
             // SPR算出パネル（左パネルの左側 / 算出ロジックは今後実装）
             const sprCalcPanel = document.createElement('div');
@@ -2652,7 +2868,7 @@ function newFunction() {
                 '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;padding-bottom:4px;border-bottom:2px solid #e0f2f1;">' +
                 '<span style="font-weight:bold;color:#00897B;font-size:13px;">SPR算出</span>' +
                 '<div style="display:flex;align-items:center;gap:8px;">' +
-                '<button id="spr-calc-setting-btn" title="SPR設定の表示/非表示" style="' + sprSmallBtnStyle(getSprCalcShowSetting()) + '">SPR設定</button>' +
+                '<button id="spr-calc-setting-btn" style="' + sprSmallBtnStyle(getSprCalcShowSetting()) + '">SPR設定</button>' +
                 '<label style="font-size:10px;color:#555;cursor:pointer;white-space:nowrap;"><input type="radio" name="spr-calc-basis" value="required"' + (sprBasis === 'required' ? ' checked' : '') + ' style="vertical-align:middle;margin:0 2px 0 0;" />必須</label>' +
                 '<label style="font-size:10px;color:#555;cursor:pointer;white-space:nowrap;"><input type="radio" name="spr-calc-basis" value="accepted"' + (sprBasis === 'accepted' ? ' checked' : '') + ' style="vertical-align:middle;margin:0 2px 0 0;" />受諾</label>' +
                 '<button id="spr-calc-close" style="background:none;border:none;font-size:16px;color:#999;cursor:pointer;line-height:1;padding:0 2px;">×</button>' +
@@ -2675,6 +2891,7 @@ function newFunction() {
                 sprCalcOpen = !!open;
                 saveSprCalcPanelOpen(sprCalcOpen);
                 applySprCalcVisibility();
+                renderTimePanel();
             };
 
             leftPanel.querySelector('#spr-calc-btn')?.addEventListener('click', function () {
@@ -2699,6 +2916,14 @@ function newFunction() {
 
             renderSprCalcBody(sprCalcBody);
 
+            leftPanel.querySelector('#cvp-apply-toggle')?.addEventListener('click', function () {
+                const next = !getCvpApplyEnabled();
+                saveCvpApplyEnabled(next);
+                this.textContent = cvpApplyBtnText(next);
+                this.style.cssText = cvpApplyBtnStyle(next);
+                refreshCycleValues();
+            });
+
             // 右上に全体表示/非表示ボタン
             const toggleBtn = document.createElement('button');
             toggleBtn.id = 'dsp-toggle-btn';
@@ -2718,7 +2943,6 @@ function newFunction() {
             const settingsBtn = document.createElement('button');
             settingsBtn.id = 'dsp-settings-btn';
             settingsBtn.textContent = 'Cycle設定';
-            settingsBtn.title = 'Cycle名称・時間帯の設定';
             settingsBtn.style.cssText = 'position:absolute;top:3px;right:62px;padding:2px 6px;background:#f1f8e9;border:1px solid #a5d6a7;border-radius:4px;font-size:10px;font-weight:bold;cursor:pointer;color:#2e7d32;line-height:1.3;white-space:nowrap;z-index:2;';
             settingsBtn.addEventListener('click', function (e) { e.stopPropagation(); openTimeRangeSettings(); });
             box.appendChild(settingsBtn);
