@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      18.2
+// @version      18.3
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -1347,7 +1347,7 @@ function newFunction() {
         // === CVP(Adjust) 出力 ===
         // Adjust（dsp-time-req-adjust の delta≠0）が入っている Block だけを CVP 形式で出力する。
         // 必須台数は adjust 後の値（buildBlockMatrix と同じ Math.max(0, 必須+delta)）。
-        const downloadCvpAdjustExcel = () => {
+        const downloadCvpAdjustCsv = () => {
             // 1W / Fill の日付タブ巡回中は別日のデータを掴むので出力しない
             if (isFutureRequiredDownloading) return;
             if (!currentSSDData || !currentTimeDataList.length) {
@@ -1398,7 +1398,6 @@ function newFunction() {
             }
 
             const wsData = [
-                [], // 1行目は空行（ヘッダは2行目 / データは3行目から）
                 ['Target Date', 'Node', 'Service Type', 'Cycle', 'Start', 'Time', 'Block Length', 'Required Number of Drivers'],
                 ...exportRows
             ];
@@ -1417,8 +1416,8 @@ function newFunction() {
             ];
             XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
 
-            const fileName = 'SSD_cvp_adjust_' + formatFileYMD(baseDate) + '.xlsx';
-            XLSX.writeFile(wb, fileName);
+            const fileName = 'SSD_cvp_adjust_' + formatFileYMD(baseDate) + '.csv';
+            XLSX.writeFile(wb, fileName, { bookType: 'csv' });
             showDownloadNotification(fileName);
         };
         // === /CVP(Adjust) 出力 ===
@@ -2641,13 +2640,13 @@ function newFunction() {
                 const clearBtnHtml = showAdjust
                     ? '<button id="time-adj-clear" style="margin-left:8px;padding:1px 6px;background:#fff;border:1px solid #ccc;border-radius:3px;font-size:9px;font-weight:bold;color:#666;cursor:pointer;vertical-align:middle;white-space:nowrap;">Adjustクリア</button>'
                     : '';
-                const cvpBtnHtml = showAdjust
-                    ? '<button id="time-adj-cvp" style="margin-left:8px;padding:1px 6px;background:#fff;border:1px solid #ccc;border-radius:3px;font-size:9px;font-weight:bold;color:#666;cursor:pointer;vertical-align:middle;white-space:nowrap;">CVP</button>'
+                const csvBtnHtml = showAdjust
+                    ? '<button id="time-adj-csv" style="margin-left:8px;padding:1px 6px;background:#fff;border:1px solid #ccc;border-radius:3px;font-size:9px;font-weight:bold;color:#666;cursor:pointer;vertical-align:middle;white-space:nowrap;">CSV</button>'
                     : '';
 
                 // 見出し行とヘッダ行は sticky で固定（データ行だけがスクロールする）
                 return '<div style="position:sticky;top:0;z-index:1;background:#fff;padding-top:6px;padding-bottom:2px;">' +
-                    sectionTitle('開始時刻別' + clearBtnHtml + cvpBtnHtml, '#4CAF50') +
+                    sectionTitle('開始時刻別' + clearBtnHtml + csvBtnHtml, '#4CAF50') +
                     '<div style="display:grid;grid-template-columns:' + timeGridCols + ';gap:6px;padding:3px 8px;font-weight:bold;color:#666;font-size:10px;">' +
                     '<span>Cycle</span><span>開始時刻</span><span>サービスタイプ</span><span style="text-align:center;">Length</span><span style="text-align:center;">必須</span><span style="text-align:center;">受諾</span>' +
                     (showAdjust ? '<span style="text-align:center;">Adjust</span>' : '') +
@@ -2844,7 +2843,7 @@ function newFunction() {
                     renderSprCalcBody();
                 });
 
-                rightPanel.querySelector('#time-adj-cvp')?.addEventListener('click', downloadCvpAdjustExcel);
+                rightPanel.querySelector('#time-adj-csv')?.addEventListener('click', downloadCvpAdjustCsv);
             };
 
             // Adjust 列（+ Adjustクリア）は SPR算出パネルが開いているときだけ出力する
