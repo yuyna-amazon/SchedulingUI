@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      19.0
+// @version      19.3
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -21,7 +21,7 @@ function newFunction() {
         // === スクリプトバージョン（ヘッダーの @version と同期） ===
         const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version)
             ? GM_info.script.version
-            : '18.9';
+            : '19.3';
 
         // === 同一開始時刻あたりの必須上限（Yard capacity / 超過でハイライト） ===
         const YARD_CAPACITY_DEFAULT = 15;
@@ -2151,7 +2151,7 @@ function newFunction() {
             return '<span style="color:#f44336;font-weight:bold;margin-left:2px;">' + (adj > 0 ? '+' : '') + adj + '</span>';
         };
 
-        const sectionTitle = (text, color) => '<div style="font-weight:bold;color:' + color + ';padding:4px 2px;margin-bottom:6px;font-size:13px;border-bottom:1px solid #eee;">' + text + '</div>';
+        const sectionTitle = (text, color) => '<div style="display:flex;align-items:center;font-weight:bold;color:' + color + ';padding:4px 2px;margin-bottom:6px;font-size:13px;border-bottom:1px solid #eee;">' + text + '</div>';
 
         // Soft合計を2種類計算
         const calcSoftTotals = () => {
@@ -3045,15 +3045,16 @@ function newFunction() {
                 }
 
                 const clearBtnHtml = showAdjust
-                    ? '<button id="time-adj-clear" style="margin-left:8px;padding:1px 6px;background:#fff;border:1px solid #ccc;border-radius:3px;font-size:9px;font-weight:bold;color:#666;cursor:pointer;vertical-align:middle;white-space:nowrap;">Adjustクリア</button>'
+                    ? '<button id="time-adj-clear" style="margin-left:8px;padding:1px 6px;background:#fff;border:1px solid #ccc;border-radius:3px;font-size:9px;font-weight:bold;color:#666;cursor:pointer;line-height:normal;vertical-align:middle;white-space:nowrap;">Adjustクリア</button>'
                     : '';
                 const csvBtnHtml = showAdjust
-                    ? '<button id="time-adj-csv" style="margin-left:8px;padding:1px 6px;background:#fff;border:1px solid #ccc;border-radius:3px;font-size:9px;font-weight:bold;color:#666;cursor:pointer;vertical-align:middle;white-space:nowrap;">CSV</button>'
+                    ? '<button id="time-adj-csv" style="margin-left:8px;padding:1px 6px;background:#fff;border:1px solid #ccc;border-radius:3px;font-size:9px;font-weight:bold;color:#666;cursor:pointer;line-height:normal;vertical-align:middle;white-space:nowrap;">CSV</button>'
                     : '';
+                const settingsBtnHtml = '<button id="dsp-settings-btn" style="margin-left:auto;margin-right:64px;padding:1px 6px;background:#f1f8e9;border:1px solid #a5d6a7;border-radius:4px;font-size:9px;font-weight:bold;cursor:pointer;color:#2e7d32;line-height:normal;vertical-align:middle;white-space:nowrap;">Cycle設定</button>';
 
                 // 見出し行とヘッダ行は sticky で固定（データ行だけがスクロールする）
                 return '<div style="position:sticky;top:0;z-index:1;background:#fff;padding-top:6px;padding-bottom:2px;">' +
-                    sectionTitle('開始時刻別' + clearBtnHtml + csvBtnHtml, '#4CAF50') +
+                    sectionTitle('<span style="white-space:nowrap;">開始時刻別</span>' + clearBtnHtml + csvBtnHtml + settingsBtnHtml, '#4CAF50') +
                     '<div style="display:grid;grid-template-columns:' + timeGridCols + ';gap:6px;padding:3px 8px;font-weight:bold;color:#666;font-size:10px;">' +
                     '<span>Cycle</span><span>開始時刻</span><span>サービスタイプ</span><span style="text-align:center;">Length</span><span style="text-align:center;">必須</span><span style="text-align:center;">受諾</span>' +
                     (showAdjust ? '<span style="text-align:center;">Adjust</span>' : '') +
@@ -3218,7 +3219,7 @@ function newFunction() {
             const rightPanel = document.createElement('div');
             // 上部 6px の padding は sticky ラッパー側に持たせる（固定部の上に行が透けないようにする）
             // width は renderTimePanel() が Adjust 列の有無に合わせて設定する
-            // position:relative;z-index:0 で右パネルを独立したスタッキングコンテキストにする（sticky ヘッダの z-index を右パネル内に閉じ込め、box 直下の × / v表示 / Cycle設定 と競合させない）
+            // rightPanel を独立したスタッキングコンテキストにし、sticky ヘッダの z-index を右パネル内に閉じ込める
             rightPanel.style.cssText = 'position:relative;z-index:0;padding:0 8px 6px;overflow-y:auto;overflow-x:hidden;box-sizing:border-box;';
 
             // 開始時刻別の必須 adjust（SPR算出パネルのみ再描画）
@@ -3249,6 +3250,11 @@ function newFunction() {
                 });
 
                 rightPanel.querySelector('#time-adj-csv')?.addEventListener('click', downloadCvpAdjustCsv);
+
+                rightPanel.querySelector('#dsp-settings-btn')?.addEventListener('click', function (e) {
+                    e.stopPropagation();
+                    openTimeRangeSettings();
+                });
             };
 
             // Adjust 列（+ Adjustクリア）は SPR算出パネルが開いているときだけ出力する
@@ -3332,7 +3338,7 @@ function newFunction() {
             const toggleBtn = document.createElement('button');
             toggleBtn.id = 'dsp-toggle-btn';
             toggleBtn.textContent = '×';
-            toggleBtn.style.cssText = 'position:absolute;top:4px;right:8px;background:none;border:none;font-size:18px;cursor:pointer;color:#999;font-weight:bold;line-height:1;z-index:1;';
+            toggleBtn.style.cssText = 'position:absolute;top:8px;right:8px;display:flex;align-items:center;justify-content:center;min-width:24px;height:20px;padding:0;background:none;border:none;font-size:14px;cursor:pointer;color:#999;font-weight:bold;line-height:20px;box-sizing:border-box;z-index:1;';
             box.style.position = 'fixed';
             box.appendChild(toggleBtn);
 
@@ -3340,16 +3346,8 @@ function newFunction() {
             const versionLabel = document.createElement('span');
             versionLabel.id = 'dsp-version-label';
             versionLabel.textContent = 'v' + SCRIPT_VERSION;
-            versionLabel.style.cssText = 'position:absolute;top:7px;right:28px;font-size:10px;color:#bbb;font-weight:bold;line-height:1;z-index:1;pointer-events:none;';
+            versionLabel.style.cssText = 'position:absolute;top:8px;right:36px;display:flex;align-items:center;height:20px;font-size:12px;color:#999;font-weight:bold;line-height:20px;z-index:1;pointer-events:none;';
             box.appendChild(versionLabel);
-
-            // バージョン表示の左隣に設定ボタン
-            const settingsBtn = document.createElement('button');
-            settingsBtn.id = 'dsp-settings-btn';
-            settingsBtn.textContent = 'Cycle設定';
-            settingsBtn.style.cssText = 'position:absolute;top:3px;right:62px;padding:2px 6px;background:#f1f8e9;border:1px solid #a5d6a7;border-radius:4px;font-size:10px;font-weight:bold;cursor:pointer;color:#2e7d32;line-height:1.3;white-space:nowrap;z-index:2;';
-            settingsBtn.addEventListener('click', function (e) { e.stopPropagation(); openTimeRangeSettings(); });
-            box.appendChild(settingsBtn);
 
             document.body.appendChild(box);
 
@@ -3366,6 +3364,8 @@ function newFunction() {
                 box.style.top = '10px';
                 toggleBtn.textContent = 'Cap計算';
                 toggleBtn.style.fontSize = '12px';
+                toggleBtn.style.height = 'auto';
+                toggleBtn.style.lineHeight = 'normal';
                 toggleBtn.style.color = '#4CAF50';
                 toggleBtn.style.padding = '6px 30px';
                 toggleBtn.style.background = '#e8f5e9';
@@ -3373,7 +3373,6 @@ function newFunction() {
                 toggleBtn.style.border = '1px solid #4CAF50';
                 toggleBtn.style.whiteSpace = 'nowrap';
                 versionLabel.style.display = 'none';
-                settingsBtn.style.display = 'none';
                 isHidden = true;
             };
             var showUI = function () {
@@ -3387,7 +3386,9 @@ function newFunction() {
                 box.style.top = 'auto';
                 box.style.bottom = '20px';
                 toggleBtn.textContent = '×';
-                toggleBtn.style.fontSize = '18px';
+                toggleBtn.style.fontSize = '14px';
+                toggleBtn.style.height = '20px';
+                toggleBtn.style.lineHeight = '20px';
                 toggleBtn.style.color = '#999';
                 toggleBtn.style.padding = '0';
                 toggleBtn.style.background = 'none';
@@ -3395,7 +3396,6 @@ function newFunction() {
                 toggleBtn.style.border = 'none';
                 toggleBtn.style.whiteSpace = '';
                 versionLabel.style.display = '';
-                settingsBtn.style.display = '';
                 isHidden = false;
             };
             toggleBtn.addEventListener('click', function () {
