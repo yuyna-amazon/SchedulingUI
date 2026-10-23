@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      18.3
+// @version      18.9
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -21,7 +21,7 @@ function newFunction() {
         // === スクリプトバージョン（ヘッダーの @version と同期） ===
         const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version)
             ? GM_info.script.version
-            : '15.0';
+            : '18.9';
 
         // === 同一開始時刻あたりの必須上限（Yard capacity / 超過でハイライト） ===
         const YARD_CAPACITY_DEFAULT = 15;
@@ -110,6 +110,43 @@ function newFunction() {
 
         const SSD_LIST = ['SSD_1', 'SSD_1_B', 'SSD_2', 'SSD_3', 'SSD_3_B', 'SSD_4', 'SSD_C1', 'SSD_C3'];
         const SPR_LIST = ['SSD_1', 'SSD_1_B', 'SSD_2', 'SSD_3', 'SSD_3_B', 'SSD_4'];
+        const SSDF_LIST = ['SSDF_1', 'SSDF_2', 'SSDF_3', 'SSDF_4', 'SSDF_5', 'SSDF_6', 'SSDF_7', 'SSDF_8'];
+        const SSDF_DEFAULTS = {
+            'SSDF_1': 50, 'SSDF_2': 30.8, 'SSDF_3': 26.9, 'SSDF_4': 33.9,
+            'SSDF_5': 32, 'SSDF_6': 26, 'SSDF_7': 1, 'SSDF_8': 1
+        };
+        const SSDF_ADJUSTMENT_DEFAULTS = {};
+        SSDF_LIST.forEach(k => {
+            SSDF_ADJUSTMENT_DEFAULTS[k] = 0;
+        });
+        const SSDF_LENGTH_SPR_DEFAULTS = {
+            'SSDF_1': { '5': 59.1, '4.5': 55.7, '4': 48.8, '3.5': 39.5, '3': 27.3, '2.5': 12, '2': 14.1 },
+            'SSDF_2': { '5': 38.5, '4.5': 53.6, '4': 49.8, '3.5': 46, '3': 26.9, '2.5': 19.5, '2': 12, '1.5': 16 },
+            'SSDF_3': { '4.5': 32.1, '4': 39.5, '3.5': 21.2, '3': 24.8, '2.5': 20, '2': 17 },
+            'SSDF_4': { '5': 57.8, '4.5': 43, '4': 42.9, '3.5': 32.7, '3': 26.2, '2.5': 18.2, '2': 14 },
+            'SSDF_5': { '5': 54.7, '4.5': 52.4, '4': 41.1, '3.5': 30.2, '3': 25.8, '2.5': 15.1, '2': 11.8 },
+            'SSDF_6': { '4.5': 38.2, '4': 42.4, '3.5': 31.5, '3': 23, '2.5': 17.6, '2': 9.4 },
+            'SSDF_7': {},
+            'SSDF_8': {}
+        };
+        // 8 Sector は deliveryWindowEnd を start inclusive / end exclusive で分類する。
+        const SSDF_TIME_RANGES = [
+            { key: 'SSDF_1', min: 0, max: 420 },
+            { key: 'SSDF_2', min: 420, max: 600 },
+            { key: 'SSDF_3', min: 600, max: 780 },
+            { key: 'SSDF_4', min: 780, max: 960 },
+            { key: 'SSDF_5', min: 960, max: 1140 },
+            { key: 'SSDF_6', min: 1140, max: 1260 },
+            { key: 'SSDF_7', min: 1260, max: 1320 },
+            { key: 'SSDF_8', min: 1320, max: 1440 }
+        ];
+
+        const getCycleMode = () => getStorage('dsp-cycle-mode', '6') === '8' ? '8' : '6';
+        const saveCycleMode = (mode) => setStorage('dsp-cycle-mode', mode === '8' ? '8' : '6');
+        const isEightSectorMode = () => getCycleMode() === '8';
+        const getActiveCycleKeys = () => isEightSectorMode() ? SSDF_LIST : SSD_LIST;
+        const getActivePrimaryCycleKeys = () => isEightSectorMode() ? SSDF_LIST : SPR_LIST;
+        const getModeStorageKey = (sixKey, eightKey) => isEightSectorMode() ? eightKey : sixKey;
 
         // === SSD表示名（内部キーは固定、表示・Excel出力名のみ変更可）===
         const SSD_LABEL_DEFAULTS = {};
@@ -125,6 +162,8 @@ function newFunction() {
         // === Daily SPR設定テンプレート（Amazon Drive） ===
         const SPR_TEMPLATE_NAME = 'Daily SPR設定.xlsx';
         const SPR_TEMPLATE_URL = 'https://drive.corp.amazon.com/view/yuyna@/Daily%20SPR%E8%A8%AD%E5%AE%9A.xlsx?download=true';
+        const SPR_TEMPLATE_8_NAME = 'Daily SPR設定_8Sector.xlsx';
+        const SPR_TEMPLATE_8_URL = 'https://drive.corp.amazon.com/documents/yuyna@/Daily%20SPR%E8%A8%AD%E5%AE%9A_8Sector.xlsx';
 
         // === Fillサマリー設定 ===
         const FILL_DAYS_DEFAULT = 7;
@@ -167,6 +206,154 @@ function newFunction() {
             for (let i = 0; i < SSD_TIME_RANGES.length; i++) {
                 const r = SSD_TIME_RANGES[i];
                 if (timeMinutes >= r.min && timeMinutes < r.max) return r.key;
+            }
+            return null;
+        };
+
+        const getPageKo = () => {
+            try {
+                if (typeof unsafeWindow !== 'undefined' && unsafeWindow && unsafeWindow.ko) return unsafeWindow.ko;
+            } catch (e) { }
+            try {
+                if (window && window.ko) return window.ko;
+            } catch (e) { }
+            return null;
+        };
+
+        const unwrapKoValue = (value) => {
+            let current = value;
+            const koApi = getPageKo();
+            for (let i = 0; i < 4 && typeof current === 'function'; i++) {
+                try {
+                    current = koApi && typeof koApi.unwrap === 'function' ? koApi.unwrap(current) : current();
+                } catch (e) { return null; }
+            }
+            return current;
+        };
+
+        const getValidDateMinutes = (value) => {
+            if (!value || typeof value.getTime !== 'function') return null;
+            try {
+                const time = value.getTime();
+                return Number.isFinite(time) ? value.getHours() * 60 + value.getMinutes() : null;
+            } catch (e) { return null; }
+        };
+
+        const normalizeHourMinute = (hour, minute) => {
+            const h = Number(hour);
+            const m = Number(minute);
+            if (!Number.isFinite(h) || !Number.isFinite(m) || m < 0 || m >= 60) return null;
+            if (h === 24 && m === 0) return 0;
+            if (h < 0 || h >= 24) return null;
+            return Math.floor(h) * 60 + Math.floor(m);
+        };
+
+        const parseDeliveryWindowEndMinutes = (raw) => {
+            const value = unwrapKoValue(raw);
+            if (value === null || value === undefined || value === '') return null;
+
+            const directDateMinutes = getValidDateMinutes(value);
+            if (directDateMinutes !== null) return directDateMinutes;
+
+            if (typeof value === 'number') {
+                if (!Number.isFinite(value) || value < 0) return null;
+                if (value <= 1440) return Math.floor(value) % 1440;
+                // 1日以内の整数は秒単位、Unix timeは桁数で秒/ミリ秒を区別する。
+                if (Number.isInteger(value) && value <= 86400) return Math.floor(value / 60) % 1440;
+                if (value >= 1e9 && value < 1e11) return getValidDateMinutes(new Date(value * 1000));
+                if (value >= 1e11 && value < 1e14) return getValidDateMinutes(new Date(value));
+                return null;
+            }
+
+            if (typeof value === 'object') {
+                if (typeof value.toDate === 'function') {
+                    try {
+                        const dateMinutes = getValidDateMinutes(value.toDate());
+                        if (dateMinutes !== null) return dateMinutes;
+                    } catch (e) { }
+                }
+                let hour = value.hour !== undefined ? value.hour : value.hours;
+                let minute = value.minute !== undefined ? value.minute : value.minutes;
+                try { if (typeof hour === 'function') hour = hour.call(value); } catch (e) { hour = null; }
+                try { if (typeof minute === 'function') minute = minute.call(value); } catch (e) { minute = null; }
+                const objectMinutes = normalizeHourMinute(unwrapKoValue(hour), unwrapKoValue(minute));
+                if (objectMinutes !== null) return objectMinutes;
+            }
+
+            const text = String(value).trim();
+            if (/^\d+(?:\.\d+)?$/.test(text)) return parseDeliveryWindowEndMinutes(Number(text));
+            // 日付付き文字列はタイムゾーンを含めてDateに解釈する。
+            if (/\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{4}-\d{2}-\d{2}T/i.test(text)) {
+                const dateMinutes = getValidDateMinutes(new Date(text));
+                if (dateMinutes !== null) return dateMinutes;
+            }
+
+            const match = /(午前|午後|am|pm)?\s*(\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?\s*(午前|午後|am|pm)?/i.exec(text);
+            if (match) {
+                let hour = Number(match[2]);
+                const minute = Number(match[3]);
+                const period = String(match[1] || match[4] || '').toLowerCase();
+                if ((period === '午後' || period === 'pm') && hour !== 12) hour += 12;
+                if ((period === '午前' || period === 'am') && hour === 12) hour = 0;
+                const textMinutes = normalizeHourMinute(hour, minute);
+                if (textMinutes !== null) return textMinutes;
+            }
+
+            return getValidDateMinutes(new Date(text));
+        };
+
+        const getDeliveryWindowEndMinutes = (row) => {
+            const koApi = getPageKo();
+            if (!koApi || !row) return null;
+
+            const models = [];
+            const seenModels = new Set();
+            const addModel = value => {
+                const model = unwrapKoValue(value);
+                if (model === null || model === undefined || seenModels.has(model)) return;
+                seenModels.add(model);
+                models.push(model);
+            };
+            const addContext = context => {
+                if (!context) return;
+                addModel(context.$data);
+                (context.$parents || []).forEach(addModel);
+            };
+
+            // 行自身を優先し、必要に応じて祖先DOMの$data/$parentsとdataForも確認する。
+            for (let node = row; node && node.nodeType === 1; node = node.parentElement) {
+                if (typeof koApi.contextFor === 'function') {
+                    try { addContext(koApi.contextFor(node)); } catch (e) { }
+                }
+                if (typeof koApi.dataFor === 'function') {
+                    try { addModel(koApi.dataFor(node)); } catch (e) { }
+                }
+                if (node.tagName === 'TABLE') break;
+            }
+
+            for (let i = 0; i < models.length; i++) {
+                const model = models[i];
+                try {
+                    if (!('deliveryWindowEnd' in Object(model))) continue;
+                    const minutes = parseDeliveryWindowEndMinutes(model.deliveryWindowEnd);
+                    if (minutes !== null) return minutes;
+                } catch (e) { }
+            }
+            return null;
+        };
+
+        const calculateDeliveryWindowEndMinutes = (startMinutes, blockLengthHours) => {
+            const start = Number(startMinutes);
+            const length = Number(blockLengthHours);
+            if (!Number.isFinite(start) || start < 0 || start >= 1440 || !Number.isFinite(length) || length <= 0) return null;
+            return (Math.floor(start) + Math.round(length * 60)) % 1440;
+        };
+
+        const getSSDFGroup = (deliveryWindowEndMinutes) => {
+            if (deliveryWindowEndMinutes === null) return null;
+            for (let i = 0; i < SSDF_TIME_RANGES.length; i++) {
+                const r = SSDF_TIME_RANGES[i];
+                if (deliveryWindowEndMinutes >= r.min && deliveryWindowEndMinutes < r.max) return r.key;
             }
             return null;
         };
@@ -352,12 +539,21 @@ function newFunction() {
 
         const setStorage = (key, val) => localStorage.setItem(key, typeof val === 'object' ? JSON.stringify(val) : String(val));
 
-        const getSSDMultipliers = () => getStorage('dsp-ssd-multipliers', SSD_DEFAULTS);
-        const saveSSDMultipliers = (m) => setStorage('dsp-ssd-multipliers', m);
-        const getSSDAdjustments = () => getStorage('dsp-ssd-adjustments', SSD_ADJUSTMENT_DEFAULTS);
-        const saveSSDAdjustments = (a) => setStorage('dsp-ssd-adjustments', a);
-        const getSSDSoftAdjustments = () => getStorage('dsp-ssd-soft-adjustments', SSD_SOFT_ADJUSTMENT_DEFAULTS);
-        const saveSSDSoftAdjustments = (a) => setStorage('dsp-ssd-soft-adjustments', a);
+        const getSSDMultipliers = () => getStorage(
+            getModeStorageKey('dsp-ssd-multipliers', 'dsp-ssdf-multipliers'),
+            isEightSectorMode() ? SSDF_DEFAULTS : SSD_DEFAULTS
+        );
+        const saveSSDMultipliers = (m) => setStorage(getModeStorageKey('dsp-ssd-multipliers', 'dsp-ssdf-multipliers'), m);
+        const getSSDAdjustments = () => getStorage(
+            getModeStorageKey('dsp-ssd-adjustments', 'dsp-ssdf-adjustments'),
+            isEightSectorMode() ? SSDF_ADJUSTMENT_DEFAULTS : SSD_ADJUSTMENT_DEFAULTS
+        );
+        const saveSSDAdjustments = (a) => setStorage(getModeStorageKey('dsp-ssd-adjustments', 'dsp-ssdf-adjustments'), a);
+        const getSSDSoftAdjustments = () => getStorage(
+            getModeStorageKey('dsp-ssd-soft-adjustments', 'dsp-ssdf-soft-adjustments'),
+            isEightSectorMode() ? SSDF_ADJUSTMENT_DEFAULTS : SSD_SOFT_ADJUSTMENT_DEFAULTS
+        );
+        const saveSSDSoftAdjustments = (a) => setStorage(getModeStorageKey('dsp-ssd-soft-adjustments', 'dsp-ssdf-soft-adjustments'), a);
         const getSoftPct = () => Number(getStorage('dsp-soft-pct', '0'));
         const saveSoftPct = (v) => setStorage('dsp-soft-pct', String(v));
         const getHardPct = () => Number(getStorage('dsp-hard-pct', '10'));
@@ -367,6 +563,7 @@ function newFunction() {
         const getCvpApplyEnabled = () => getStorage('dsp-cvp-apply-enabled', true);
         const saveCvpApplyEnabled = (v) => setStorage('dsp-cvp-apply-enabled', !!v);
         const getEffectiveC1C3Overrides = () => {
+            if (isEightSectorMode()) return {};
             const overrides = getC1C3Overrides();
             if (getCvpApplyEnabled()) return overrides;
             const effective = { ...overrides, 'SSD_C1': 0, 'SSD_C3': 0 };
@@ -442,9 +639,11 @@ function newFunction() {
         // SPR算出パネル用のSPR（Cycle × Length ごと / Block数に掛けてVolを算出）
         // 形式: { 'SSD_1': { '5': 60.9, '4.5': 51.8, ... }, ... }
         const getSprCalcLenSpr = () => {
-            const stored = getStorage('dsp-spr-calc-len-spr', {});
+            const storageKey = getModeStorageKey('dsp-spr-calc-len-spr', 'dsp-ssdf-spr-calc-len-spr');
+            const initial = isEightSectorMode() && localStorage.getItem(storageKey) === null ? SSDF_LENGTH_SPR_DEFAULTS : {};
+            const stored = getStorage(storageKey, initial);
             const out = {};
-            SPR_LIST.forEach(k => {
+            getActivePrimaryCycleKeys().forEach(k => {
                 out[k] = {};
                 const row = stored && typeof stored[k] === 'object' && stored[k] ? stored[k] : {};
                 Object.keys(row).forEach(l => {
@@ -454,33 +653,37 @@ function newFunction() {
             });
             return out;
         };
-        const saveSprCalcLenSpr = (v) => setStorage('dsp-spr-calc-len-spr', v);
-        // 参照ファイル 19〜24行目の CVP Vol（Cycleごと）
-        const CVP_VOL_DEFAULTS = {};
-        SPR_LIST.forEach(k => { CVP_VOL_DEFAULTS[k] = 0; });
+        const saveSprCalcLenSpr = (v) => setStorage(getModeStorageKey('dsp-spr-calc-len-spr', 'dsp-ssdf-spr-calc-len-spr'), v);
+        // 参照ファイルのCVP Volは6 Sector専用。8 Sectorは分離保存し、未設定を0とする。
+        const getCvpVolDefaults = () => {
+            const defaults = {};
+            getActivePrimaryCycleKeys().forEach(k => { defaults[k] = 0; });
+            return defaults;
+        };
         const getCvpVol = () => {
-            const stored = getStorage('dsp-cvp-vol', CVP_VOL_DEFAULTS);
+            const defaults = getCvpVolDefaults();
+            const stored = getStorage(getModeStorageKey('dsp-cvp-vol', 'dsp-ssdf-cvp-vol'), defaults);
             const out = {};
-            SPR_LIST.forEach(k => {
+            getActivePrimaryCycleKeys().forEach(k => {
                 const v = Number(stored && stored[k]);
                 out[k] = Number.isFinite(v) && v > 0 ? v : 0;
             });
             return out;
         };
-        const saveCvpVol = (v) => setStorage('dsp-cvp-vol', v);
+        const saveCvpVol = (v) => setStorage(getModeStorageKey('dsp-cvp-vol', 'dsp-ssdf-cvp-vol'), v);
         // ActSPRシートのSPR列（J列相当）の値
-        const ACT_SPR_TOTAL_DEFAULTS = {};
-        SPR_LIST.forEach(k => { ACT_SPR_TOTAL_DEFAULTS[k] = 0; });
         const getActSprTotal = () => {
-            const stored = getStorage('dsp-act-spr-total', ACT_SPR_TOTAL_DEFAULTS);
+            const defaults = {};
+            getActivePrimaryCycleKeys().forEach(k => { defaults[k] = 0; });
+            const stored = getStorage(getModeStorageKey('dsp-act-spr-total', 'dsp-ssdf-act-spr-total'), defaults);
             const out = {};
-            SPR_LIST.forEach(k => {
+            getActivePrimaryCycleKeys().forEach(k => {
                 const v = Number(stored && stored[k]);
                 out[k] = Number.isFinite(v) && v > 0 ? v : 0;
             });
             return out;
         };
-        const saveActSprTotal = (v) => setStorage('dsp-act-spr-total', v);
+        const saveActSprTotal = (v) => setStorage(getModeStorageKey('dsp-act-spr-total', 'dsp-ssdf-act-spr-total'), v);
         // 算出SPRを左パネルのSPR（倍率）へ反映するか
         const getSprCalcApply = () => getStorage('dsp-spr-calc-apply', false);
         const saveSprCalcApply = (v) => setStorage('dsp-spr-calc-apply', !!v);
@@ -493,11 +696,19 @@ function newFunction() {
         const cvpApplyBtnStyle = (on) => sprSmallBtnStyle(on) +
             'width:100%;padding:1px 2px;box-sizing:border-box;line-height:1.2;';
         // ON にする直前のSPR（OFF で復元する）
-        const getSprCalcMultBackup = () => getStorage('dsp-spr-calc-mult-backup', SSD_DEFAULTS);
-        const saveSprCalcMultBackup = (v) => setStorage('dsp-spr-calc-mult-backup', v);
+        const getSprCalcMultBackup = () => getStorage(
+            getModeStorageKey('dsp-spr-calc-mult-backup', 'dsp-ssdf-spr-calc-mult-backup'),
+            isEightSectorMode() ? SSDF_DEFAULTS : SSD_DEFAULTS
+        );
+        const saveSprCalcMultBackup = (v) => setStorage(getModeStorageKey('dsp-spr-calc-mult-backup', 'dsp-ssdf-spr-calc-mult-backup'), v);
 
         // === SSD表示名 ===
         const getSSDLabels = () => {
+            if (isEightSectorMode()) {
+                const out = {};
+                SSDF_LIST.forEach(k => { out[k] = k; });
+                return out;
+            }
             const stored = getStorage('dsp-ssd-labels', SSD_LABEL_DEFAULTS);
             const out = {};
             SSD_TIME_RANGE_ORDER.forEach(k => {
@@ -519,8 +730,9 @@ function newFunction() {
         const resolveSSDKey = (name) => {
             const n = String(name === undefined || name === null ? '' : name).trim().toLowerCase();
             if (!n) return null;
-            for (let i = 0; i < SPR_LIST.length; i++) {
-                const k = SPR_LIST[i];
+            const keys = getActivePrimaryCycleKeys();
+            for (let i = 0; i < keys.length; i++) {
+                const k = keys[i];
                 if (k.toLowerCase() === n) return k;
                 if (String(ssdLabel(k)).trim().toLowerCase() === n) return k;
             }
@@ -966,26 +1178,58 @@ function newFunction() {
                 const rowCount = rows.length;
                 const timeDataList = [];
                 const ssdData = {};
-                SSD_LIST.forEach(k => ssdData[k] = { required: 0, accepted: 0 });
+                getActiveCycleKeys().forEach(k => ssdData[k] = { required: 0, accepted: 0 });
 
                 let totalAccepted = 0;
                 let totalRequired = 0;
                 let proDPAccepted = 0;
                 let proDPRequired = 0;
 
+                const readDspBoundNumber = (row, bindingPattern) => {
+                    const els = row.querySelectorAll('[data-bind]');
+                    let found = false;
+                    for (let i = 0; i < els.length; i++) {
+                        const db = els[i].getAttribute('data-bind') || '';
+                        if (!bindingPattern.test(db)) continue;
+                        found = true;
+                        const text = els[i].textContent.trim();
+                        if (DIGIT_REGEX.test(text)) return { found: true, value: +text };
+                    }
+                    return { found, value: 0 };
+                };
+
+                const extractDspQuantities = (row) => ({
+                    required: readDspBoundNumber(row, /\brequired\s*\(\s*\)/i),
+                    pending: readDspBoundNumber(row, /\b(?:pending|printPending)\s*\(\s*\)/i),
+                    accepted: readDspBoundNumber(row, /\b(?:scheduled|confirmed|printConfirmed)\s*\(\s*\)/i)
+                });
+
+                const resolveDspSSDGroup = (name) => {
+                    const raw = String(name === undefined || name === null ? '' : name).trim();
+                    if (!raw) return null;
+                    const normalized = raw.replace(/[\s-]+/g, '_').toUpperCase();
+                    for (let i = 0; i < getActiveCycleKeys().length; i++) {
+                        const key = getActiveCycleKeys()[i];
+                        if (key === normalized || String(ssdLabel(key)).trim().toLowerCase() === raw.toLowerCase()) return key;
+                    }
+                    return null;
+                };
+
                 const serviceTypeIndices = [];
                 for (let i = 0; i < rowCount; i++) {
+                    const className = rows[i].className || '';
+                    if (!className.includes('serviceTypeRow')) continue;
                     const span = rows[i].querySelector('span.expandable');
-                    if (span) {
-                        const name = span.textContent.trim();
-                        if (isServiceTypeName(name)) {
-                            serviceTypeIndices.push({
-                                index: i,
-                                name,
-                                isProDP: name.includes('ProDP')
-                            });
-                        }
-                    }
+                    if (!span) continue;
+                    const name = span.textContent.trim();
+                    if (!name) continue;
+                    serviceTypeIndices.push({
+                        index: i,
+                        name,
+                        isFlex: isServiceTypeName(name),
+                        isDSP: !isServiceTypeName(name),
+                        isProDP: name.includes('ProDP')
+                    });
                 }
 
                 // 期間（Length）は timeWindowRow に表示されるため、行位置を先に収集して継承する
@@ -999,21 +1243,83 @@ function newFunction() {
                     if (hours !== '') durationIndices.push({ index: i, hours });
                 }
 
+                const dspDemands = [];
                 let currentServiceType = null;
                 let serviceTypeIdx = 0;
                 let currentDuration = '';
                 let durationIdx = 0;
+                let currentDspCycleText = '';
+                let currentDspSSDGroup = null;
+                let currentDspDemand = null;
 
                 for (let i = 0; i < rowCount; i++) {
                     while (serviceTypeIdx < serviceTypeIndices.length && serviceTypeIndices[serviceTypeIdx].index <= i) {
                         currentServiceType = serviceTypeIndices[serviceTypeIdx++];
                         currentDuration = '';
+                        currentDspCycleText = '';
+                        currentDspSSDGroup = null;
+                        currentDspDemand = null;
                     }
                     while (durationIdx < durationIndices.length && durationIndices[durationIdx].index <= i) {
                         currentDuration = durationIndices[durationIdx++].hours;
+                        currentDspDemand = null;
                     }
 
-                    const { timeText, requiredValue, acceptedValue, cycleText, blockLength } = extractRowData(rows[i]);
+                    const row = rows[i];
+                    const rowClassName = row.className || '';
+
+                    if (currentServiceType?.isDSP) {
+                        const waveGroupEl = row.querySelector('.dspWaveGroup');
+                        if (waveGroupEl) {
+                            currentDspCycleText = waveGroupEl.textContent.trim();
+                            currentDspSSDGroup = isEightSectorMode() ? null : resolveDspSSDGroup(currentDspCycleText);
+                            currentDspDemand = null;
+                            continue;
+                        }
+
+                        if (rowClassName.includes('providerRow')) {
+                            if (!currentDspDemand) continue;
+                            const providerData = extractRowData(row);
+                            if (!providerData.timeText) continue;
+                            const quantities = extractDspQuantities(row);
+                            if (isEightSectorMode() && currentDspDemand.deliveryWindowEndMinutes === null) {
+                                const providerDeliveryWindowEndMinutes = getDeliveryWindowEndMinutes(row);
+                                if (providerDeliveryWindowEndMinutes !== null) {
+                                    currentDspDemand.deliveryWindowEndMinutes = providerDeliveryWindowEndMinutes;
+                                    currentDspDemand.ssdGroup = getSSDFGroup(providerDeliveryWindowEndMinutes);
+                                }
+                            }
+                            currentDspDemand.providers.push({
+                                timeText: providerData.timeText,
+                                required: quantities.required,
+                                pending: quantities.pending.value,
+                                accepted: quantities.accepted.value
+                            });
+                            continue;
+                        }
+
+                        if (rowClassName.includes('dspRow')) {
+                            const quantities = extractDspQuantities(row);
+                            if (!quantities.required.found) continue;
+                            const deliveryWindowEndMinutes = isEightSectorMode() ? getDeliveryWindowEndMinutes(row) : null;
+                            currentDspDemand = {
+                                serviceType: currentServiceType,
+                                blockLength: currentDuration,
+                                cycleText: currentDspCycleText,
+                                deliveryWindowEndMinutes,
+                                ssdGroup: isEightSectorMode() ? getSSDFGroup(deliveryWindowEndMinutes) : currentDspSSDGroup,
+                                required: quantities.required.value,
+                                accepted: quantities.accepted.value,
+                                acceptedFound: quantities.accepted.found,
+                                providers: []
+                            };
+                            dspDemands.push(currentDspDemand);
+                        }
+                        continue;
+                    }
+
+                    // 6 Sectorは開始時刻、8 Sectorは行のKnockoutモデル上のdeliveryWindowEndで分類する。
+                    const { timeText, requiredValue, acceptedValue, cycleText, blockLength } = extractRowData(row);
                     if (!timeText) continue;
 
                     if (currentServiceType?.isProDP) {
@@ -1024,14 +1330,20 @@ function newFunction() {
 
                     const serviceTypeName = currentServiceType?.name || '-';
                     const timeMinutes = parseTime(timeText);
-                    const ssdGroup = getSSDGroup(timeMinutes);
+                    const effectiveBlockLength = currentDuration !== '' ? currentDuration : blockLength;
+                    let deliveryWindowEndMinutes = isEightSectorMode() ? getDeliveryWindowEndMinutes(row) : null;
+                    if (isEightSectorMode() && deliveryWindowEndMinutes === null) {
+                        deliveryWindowEndMinutes = calculateDeliveryWindowEndMinutes(timeMinutes, effectiveBlockLength);
+                    }
+                    const ssdGroup = isEightSectorMode() ? getSSDFGroup(deliveryWindowEndMinutes) : getSSDGroup(timeMinutes);
 
                     timeDataList.push({
                         time: timeText,
                         timeMinutes,
+                        deliveryWindowEndMinutes,
                         serviceType: serviceTypeName,
-                        cycle: cycleText || ssdGroup || '',
-                        blockLength: currentDuration !== '' ? currentDuration : blockLength,
+                        cycle: isEightSectorMode() ? (ssdGroup || '') : (cycleText || ssdGroup || ''),
+                        blockLength: effectiveBlockLength,
                         required: requiredValue,
                         accepted: acceptedValue,
                         ssdGroup
@@ -1046,6 +1358,59 @@ function newFunction() {
                     totalRequired += requiredValue;
                 }
 
+                // DSPはdspDemand行をCycle集計の正本とし、親wave集計行は加算しない。
+                // 開始時刻別はprovider明細だけを使い、親requiredはpending+confirmedの範囲で一度だけ配分する。
+                dspDemands.forEach(demand => {
+                    if (isEightSectorMode() && demand.deliveryWindowEndMinutes === null) {
+                        const firstTimedProvider = demand.providers.find(provider => provider.timeText);
+                        const startMinutes = firstTimedProvider ? parseTime(firstTimedProvider.timeText) : null;
+                        demand.deliveryWindowEndMinutes = calculateDeliveryWindowEndMinutes(startMinutes, demand.blockLength);
+                        demand.ssdGroup = getSSDFGroup(demand.deliveryWindowEndMinutes);
+                    }
+
+                    const providerAccepted = demand.providers.reduce((sum, provider) => sum + provider.accepted, 0);
+                    const demandAccepted = demand.acceptedFound ? demand.accepted : providerAccepted;
+
+                    if (demand.serviceType.isProDP) {
+                        proDPRequired += demand.required;
+                        proDPAccepted += demandAccepted;
+                        return;
+                    }
+
+                    totalRequired += demand.required;
+                    totalAccepted += demandAccepted;
+                    if (demand.ssdGroup) {
+                        ssdData[demand.ssdGroup].required += demand.required;
+                        ssdData[demand.ssdGroup].accepted += demandAccepted;
+                    }
+
+                    let remainingRequired = demand.required;
+                    let remainingAccepted = demandAccepted;
+                    demand.providers.forEach(provider => {
+                        const providerRequiredBase = provider.required.found
+                            ? provider.required.value
+                            : provider.pending + provider.accepted;
+                        const providerRequired = Math.min(remainingRequired, Math.max(0, providerRequiredBase));
+                        const providerAcceptedValue = Math.min(remainingAccepted, Math.max(0, provider.accepted));
+                        const timeMinutes = parseTime(provider.timeText);
+
+                        timeDataList.push({
+                            time: provider.timeText,
+                            timeMinutes,
+                            deliveryWindowEndMinutes: demand.deliveryWindowEndMinutes,
+                            serviceType: demand.serviceType.name,
+                            cycle: isEightSectorMode() ? (demand.ssdGroup || '') : (demand.cycleText || demand.ssdGroup || ''),
+                            blockLength: demand.blockLength,
+                            required: providerRequired,
+                            accepted: providerAcceptedValue,
+                            ssdGroup: demand.ssdGroup
+                        });
+
+                        remainingRequired -= providerRequired;
+                        remainingAccepted -= providerAcceptedValue;
+                    });
+                });
+
                 currentSSDData = ssdData;
                 currentTimeDataList = timeDataList;
                 currentTotals = { accepted: totalAccepted, required: totalRequired, proDPAccepted, proDPRequired };
@@ -1055,9 +1420,10 @@ function newFunction() {
 
                 // 内容が前回と同じなら再描画しない（クリックやフォーカスが失われるのを防ぐ）
                 const signature = JSON.stringify({
+                    m: getCycleMode(),
                     d: getSelectedDateText(),
                     s: ssdData,
-                    t: timeDataList.map(td => [td.timeMinutes, td.serviceType, td.blockLength, td.required, td.accepted]),
+                    t: timeDataList.map(td => [td.timeMinutes, td.deliveryWindowEndMinutes, td.ssdGroup, td.serviceType, td.blockLength, td.required, td.accepted]),
                     o: currentTotals
                 });
 
@@ -1094,8 +1460,8 @@ function newFunction() {
 
             let totalReq = 0, totalAcc = 0, totalSoft = 0, totalHard = 0;
 
-            for (let ci = 0; ci < SSD_LIST.length; ci++) {
-                const sk = SSD_LIST[ci];
+            for (let ci = 0; ci < getActiveCycleKeys().length; ci++) {
+                const sk = getActiveCycleKeys()[ci];
                 const d = currentSSDData[sk];
                 const m = getCycleMultiplier(sk, multipliers);
                 const adj = adjustments[sk] || 0;
@@ -1245,7 +1611,7 @@ function newFunction() {
             const wsData = [['Station', 'Cycle', 'Soft Caps', 'Hard Caps']];
 
             // SSD_C1 / SSD_C3 は出力しない
-            for (const ssd of SPR_LIST) {
+            for (const ssd of getActivePrimaryCycleKeys()) {
                 const d = currentSSDData[ssd];
                 const m = getCycleMultiplier(ssd, multipliers);
                 const adj = adjustments[ssd] || 0;
@@ -1370,7 +1736,7 @@ function newFunction() {
                 if (delta === 0) return; // 行の除外条件はこれだけ（Adjust 後が 0 台の行も出力する）
                 const req = Math.max(0, (td.required || 0) + delta);
                 const timeParts = getTimeParts(td.timeMinutes);
-                const cycle = td.cycle || '';
+                const cycle = isEightSectorMode() ? (td.ssdGroup || '') : (td.cycle || '');
                 const len = (td.blockLength === '' || td.blockLength === undefined || td.blockLength === null)
                     ? '' : Number(td.blockLength);
                 exportRows.push([
@@ -1383,7 +1749,8 @@ function newFunction() {
                     len,
                     req
                 ]);
-                if (!/^CYCLE/i.test(cycle) || len === '') {
+                const validCycle = isEightSectorMode() ? /^SSDF_[1-8]$/.test(cycle) : /^CYCLE/i.test(cycle);
+                if (!validCycle || len === '') {
                     suspect.push(minutesToHHMM(td.timeMinutes) + ' / Cycle ' + (cycle || '(空)') +
                         ' / Length ' + (len === '' ? '(空)' : len));
                 }
@@ -1800,8 +2167,8 @@ function newFunction() {
             let fromRequired = 0;
             let fromAccepted = 0;
 
-            for (let i = 0; i < SSD_LIST.length; i++) {
-                const sk = SSD_LIST[i];
+            for (let i = 0; i < getActiveCycleKeys().length; i++) {
+                const sk = getActiveCycleKeys()[i];
                 const d = currentSSDData[sk];
                 const m = getCycleMultiplier(sk, multipliers);
                 const adj = adjustments[sk] || 0;
@@ -1823,12 +2190,21 @@ function newFunction() {
         const openTimeRangeSettings = () => {
             document.getElementById('dsp-timerange-modal')?.remove();
 
-            const cfg = getSSDTimeRangeConfig();
+            const mode = getCycleMode();
+            const isEight = mode === '8';
+            const order = isEight ? SSDF_LIST : SSD_TIME_RANGE_ORDER;
+            const defaults = isEight
+                ? Object.fromEntries(SSDF_TIME_RANGES.map(r => [r.key, { min: r.min, max: r.max }]))
+                : SSD_TIME_RANGE_DEFAULTS;
+            const cfg = isEight ? defaults : getSSDTimeRangeConfig();
             const labels = getSSDLabels();
+            const boundaryGroups = isEight
+                ? SSDF_TIME_RANGES.slice(0, -1).map((r, i) => [r.key + '.max', SSDF_TIME_RANGES[i + 1].key + '.min'])
+                : SSD_TIME_BOUNDARY_GROUPS;
 
-            // fieldId ('SSD_1.max') → 境界グループ番号
+            // fieldId → 境界グループ番号
             const groupOf = {};
-            SSD_TIME_BOUNDARY_GROUPS.forEach((g, gi) => g.forEach(fid => { groupOf[fid] = gi; }));
+            boundaryGroups.forEach((g, gi) => g.forEach(fid => { groupOf[fid] = gi; }));
 
             const overlay = document.createElement('div');
             overlay.id = 'dsp-timerange-modal';
@@ -1837,21 +2213,22 @@ function newFunction() {
             const GRID_COLS = 'display:grid;grid-template-columns:130px 96px 12px 96px;gap:8px;align-items:center;';
 
             let rowsHtml = '';
-            SSD_TIME_RANGE_ORDER.forEach(k => {
+            order.forEach(k => {
                 const r = cfg[k];
-                const isC = (k === 'SSD_C1' || k === 'SSD_C3');
-                const isLast = (r.max === null);
+                const isC = !isEight && (k === 'SSD_C1' || k === 'SSD_C3');
+                const isLast = isEight ? r.max === 1440 : r.max === null;
+                const fieldDisabled = isEight ? ' disabled' : '';
                 rowsHtml +=
                     '<div style="' + GRID_COLS + 'padding:3px 0;' + (isC ? 'background:#fafafa;' : '') + '">' +
-                    '<input type="text" id="tr-' + k + '-name" value="' + escapeHtml(labels[k]) + '" maxlength="40" placeholder="' + k + '"' +
+                    '<input type="text" id="tr-' + k + '-name" value="' + escapeHtml(labels[k]) + '" maxlength="40" placeholder="' + k + '"' + fieldDisabled +
                     ' style="width:100%;padding:3px;border:1px solid ' + (isC ? '#ddd' : '#90CAF9') + ';border-radius:4px;text-align:center;font-size:11px;font-weight:bold;box-sizing:border-box;color:' + (isC ? '#888' : '#1565C0') + ';" />' +
-                    '<input type="time" id="tr-' + k + '-min" value="' + minutesToHHMM(r.min) + '"' +
+                    '<input type="time" id="tr-' + k + '-min" value="' + minutesToHHMM(r.min) + '"' + fieldDisabled +
                     ' style="width:100%;padding:3px;border:1px solid #ccc;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;" />' +
                     '<span style="font-size:11px;color:#888;text-align:center;">～</span>' +
                     (isLast
-                        ? '<input type="text" id="tr-' + k + '-max" value="以降" disabled' +
+                        ? '<input type="text" id="tr-' + k + '-max" value="' + (isEight ? '24:00' : '以降') + '" disabled' +
                         ' style="width:100%;padding:3px;border:1px solid #eee;border-radius:4px;text-align:center;font-size:12px;color:#999;background:#f5f5f5;box-sizing:border-box;" />'
-                        : '<input type="time" id="tr-' + k + '-max" value="' + minutesToHHMM(r.max) + '"' +
+                        : '<input type="time" id="tr-' + k + '-max" value="' + minutesToHHMM(r.max) + '"' + fieldDisabled +
                         ' style="width:100%;padding:3px;border:1px solid #ccc;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;" />') +
                     '</div>';
             });
@@ -1860,15 +2237,25 @@ function newFunction() {
             panel.style.cssText = 'background:#fff;border-radius:8px;padding:16px 18px;min-width:440px;max-height:88vh;overflow-y:auto;box-shadow:0 6px 24px rgba(0,0,0,0.3);box-sizing:border-box;';
             panel.innerHTML =
                 '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">' +
-                '<div style="font-size:14px;font-weight:bold;color:#2e7d32;">SSD設定（名称・時間帯）</div>' +
+                '<div style="font-size:14px;font-weight:bold;color:#2e7d32;">Cycle設定（名称・時間帯）</div>' +
                 '<button id="tr-close" style="background:none;border:none;font-size:18px;color:#999;cursor:pointer;line-height:1;">×</button>' +
                 '</div>' +
-                '<div style="font-size:10px;color:#777;margin-bottom:10px;">開始時刻が <strong>開始 ≦ 時刻 &lt; 終了</strong> の範囲に入るSSDへ集計されます。名称は画面表示とExcelのCycle列に反映されます。</div>' +
+                '<div style="display:flex;align-items:center;gap:8px;margin:8px 0 10px;padding:8px;background:#f1f8e9;border-radius:5px;">' +
+                '<span style="font-size:11px;font-weight:bold;color:#2e7d32;">Sector</span>' +
+                '<select id="tr-cycle-mode" style="flex:1;padding:5px;border:1px solid #a5d6a7;border-radius:4px;font-size:12px;background:#fff;">' +
+                '<option value="6"' + (mode === '6' ? ' selected' : '') + '>6 Sector</option>' +
+                '<option value="8"' + (mode === '8' ? ' selected' : '') + '>8 Sector</option>' +
+                '</select></div>' +
+                '<div style="font-size:10px;color:#777;margin-bottom:10px;">' +
+                (isEight
+                    ? 'Knockoutモデルの <strong>deliveryWindowEnd</strong> が <strong>開始 ≦ 時刻 &lt; 終了</strong> の範囲に入るSSDFへ集計されます。'
+                    : '開始時刻が <strong>開始 ≦ 時刻 &lt; 終了</strong> の範囲に入るSSDへ集計されます。名称は画面表示とExcelのCycle列に反映されます。') +
+                '</div>' +
                 '<div style="' + GRID_COLS + 'font-size:10px;font-weight:bold;color:#666;padding-bottom:4px;border-bottom:1px solid #eee;">' +
-                '<span style="text-align:center;">名称</span><span style="text-align:center;">開始</span><span></span><span style="text-align:center;">終了</span>' +
+                '<span style="text-align:center;">名称</span><span style="text-align:center;">' + (isEight ? '配達Window終了' : '開始') + '</span><span></span><span style="text-align:center;">終了</span>' +
                 '</div>' +
                 rowsHtml +
-                '<label style="display:flex;align-items:center;gap:6px;margin-top:10px;font-size:11px;color:#555;cursor:pointer;">' +
+                '<label style="display:' + (isEight ? 'none' : 'flex') + ';align-items:center;gap:6px;margin-top:10px;font-size:11px;color:#555;cursor:pointer;">' +
                 '<input type="checkbox" id="tr-link" checked />隣接する境界を連動させる（推奨）' +
                 '</label>' +
                 '<div style="margin-top:12px;padding-top:10px;border-top:1px solid #eee;">' +
@@ -1885,12 +2272,12 @@ function newFunction() {
                 '<button id="tr-reset" style="flex:2;padding:7px;background:#fff;color:#666;border:1px solid #ccc;border-radius:5px;cursor:pointer;font-size:12px;">初期値に戻す</button>' +
                 '</div>' +
                 '<div style="margin-top:12px;padding-top:10px;border-top:1px solid #eee;">' +
-                '<a href="' + escapeHtml(SPR_TEMPLATE_URL) + '" rel="noopener noreferrer"' +
+                '<a href="' + escapeHtml(isEight ? SPR_TEMPLATE_8_URL : SPR_TEMPLATE_URL) + '" target="_blank" rel="noopener noreferrer"' +
                 ' style="display:flex;align-items:center;justify-content:center;gap:6px;padding:7px;' +
                 'background:#fff;color:#00897B;border:1px solid #80CBC4;border-radius:5px;' +
                 'text-decoration:none;font-size:12px;font-weight:bold;box-sizing:border-box;">' +
                 '<span style="font-size:13px;">&#11015;</span>' +
-                '<span>' + escapeHtml(SPR_TEMPLATE_NAME) + ' テンプレート</span>' +
+                '<span>' + escapeHtml(isEight ? SPR_TEMPLATE_8_NAME : SPR_TEMPLATE_NAME) + ' テンプレート</span>' +
                 '</a>' +
                 '<div style="font-size:10px;color:#777;margin-top:5px;">SPR/CVP参照で読み込むファイルのテンプレートです。クリックするとダウンロードが始まります。</div>' +
                 '</div>';
@@ -1900,10 +2287,11 @@ function newFunction() {
 
             const msgEl = panel.querySelector('#tr-msg');
             const linkEl = panel.querySelector('#tr-link');
+            panel.querySelector('#tr-download-ssdf-template')?.addEventListener('click', downloadSSDFTemplate);
 
             const readNames = () => {
                 const out = {};
-                SSD_TIME_RANGE_ORDER.forEach(k => {
+                order.forEach(k => {
                     const el = panel.querySelector('#tr-' + k + '-name');
                     const v = el ? String(el.value || '').trim() : '';
                     out[k] = v || k;
@@ -1912,10 +2300,11 @@ function newFunction() {
             };
 
             const readForm = () => {
+                if (isEight) return { cfg: defaults, error: '' };
                 const out = {};
                 let error = '';
-                SSD_TIME_RANGE_ORDER.forEach(k => {
-                    const def = SSD_TIME_RANGE_DEFAULTS[k];
+                order.forEach(k => {
+                    const def = defaults[k];
                     const minEl = panel.querySelector('#tr-' + k + '-min');
                     const min = hhmmToMinutes(minEl.value);
                     if (min === null) error = k + ' の開始時刻が不正です';
@@ -1948,7 +2337,7 @@ function newFunction() {
 
                 // 名称の重複チェック
                 const seen = {};
-                for (const k of SSD_TIME_RANGE_ORDER) {
+                for (const k of order) {
                     const n = names[k];
                     if (seen[n]) {
                         msgEl.style.color = '#f44336';
@@ -1959,7 +2348,7 @@ function newFunction() {
                 }
 
                 // 主要SSD（C1/C3以外）は 開始 < 終了 が必須
-                for (const k of SSD_TIME_RANGE_ORDER) {
+                for (const k of order) {
                     if (k === 'SSD_C1' || k === 'SSD_C3') continue;
                     if (c[k].max !== null && c[k].min >= c[k].max) {
                         msgEl.style.color = '#f44336';
@@ -1969,7 +2358,7 @@ function newFunction() {
                 }
 
                 // 連続性チェック（警告のみ）
-                const chain = ['SSD_1', 'SSD_1_B', 'SSD_2', 'SSD_3', 'SSD_3_B', 'SSD_4'];
+                const chain = isEight ? SSDF_LIST : ['SSD_1', 'SSD_1_B', 'SSD_2', 'SSD_3', 'SSD_3_B', 'SSD_4'];
                 const gaps = [];
                 for (let i = 0; i < chain.length - 1; i++) {
                     if (c[chain[i]].max !== c[chain[i + 1]].min) gaps.push(names[chain[i]] + '→' + names[chain[i + 1]]);
@@ -1984,7 +2373,7 @@ function newFunction() {
             };
 
             // 境界連動
-            SSD_TIME_RANGE_ORDER.forEach(k => {
+            order.forEach(k => {
                 ['min', 'max'].forEach(side => {
                     const el = panel.querySelector('#tr-' + k + '-' + side);
                     if (!el || el.disabled) return;
@@ -1992,7 +2381,7 @@ function newFunction() {
                         if (linkEl.checked) {
                             const gi = groupOf[k + '.' + side];
                             if (gi !== undefined) {
-                                SSD_TIME_BOUNDARY_GROUPS[gi].forEach(fid => {
+                                boundaryGroups[gi].forEach(fid => {
                                     const target = panel.querySelector('#tr-' + fid.replace('.', '-'));
                                     if (target && target !== el && !target.disabled) target.value = el.value;
                                 });
@@ -2008,7 +2397,7 @@ function newFunction() {
             overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
 
             // 名称入力の検証
-            SSD_TIME_RANGE_ORDER.forEach(k => {
+            order.forEach(k => {
                 const el = panel.querySelector('#tr-' + k + '-name');
                 if (el) el.addEventListener('input', validate);
             });
@@ -2017,25 +2406,43 @@ function newFunction() {
             panel.querySelector('#tr-yard-cap')?.addEventListener('input', validate);
 
             panel.querySelector('#tr-reset').addEventListener('click', function () {
-                SSD_TIME_RANGE_ORDER.forEach(k => {
-                    const def = SSD_TIME_RANGE_DEFAULTS[k];
+                order.forEach(k => {
+                    const def = defaults[k];
                     panel.querySelector('#tr-' + k + '-min').value = minutesToHHMM(def.min);
-                    if (def.max !== null) panel.querySelector('#tr-' + k + '-max').value = minutesToHHMM(def.max);
-                    panel.querySelector('#tr-' + k + '-name').value = SSD_LABEL_DEFAULTS[k];
+                    if (isEight) {
+                        panel.querySelector('#tr-' + k + '-max').value = def.max === 1440 ? '24:00' : minutesToHHMM(def.max);
+                        panel.querySelector('#tr-' + k + '-name').value = k;
+                    } else {
+                        if (def.max !== null) panel.querySelector('#tr-' + k + '-max').value = minutesToHHMM(def.max);
+                        panel.querySelector('#tr-' + k + '-name').value = SSD_LABEL_DEFAULTS[k];
+                    }
                 });
                 const capEl = panel.querySelector('#tr-yard-cap');
                 if (capEl) capEl.value = YARD_CAPACITY_DEFAULT;
                 validate();
             });
 
+            panel.querySelector('#tr-cycle-mode').addEventListener('change', function () {
+                saveCycleMode(this.value);
+                refreshSSDLabelCache();
+                currentSSDData = null;
+                currentTimeDataList = [];
+                lastRenderSignature = '';
+                calculateAndDisplay();
+                openTimeRangeSettings();
+            });
+
             panel.querySelector('#tr-save').addEventListener('click', function () {
                 const result = validate();
                 if (!result) return;
-                saveSSDTimeRangeConfig(result.cfg);
-                saveSSDLabels(result.labels);
+                if (!isEight) {
+                    saveSSDTimeRangeConfig(result.cfg);
+                    saveSSDLabels(result.labels);
+                    applySSDTimeRanges();
+                }
                 saveYardCapacity(result.yardCapacity);
-                applySSDTimeRanges();
                 refreshSSDLabelCache();
+                lastRenderSignature = '';
                 close();
                 calculateAndDisplay();
             });
@@ -2048,7 +2455,7 @@ function newFunction() {
         // =====================================================
         // useAdjust が真のときだけ 開始時刻別の必須 adjust を加算する（基準=必須のときのみ有効）
         const buildBlockMatrix = (basis, useAdjust) => {
-            const keys = SPR_LIST;
+            const keys = getActivePrimaryCycleKeys();
             const map = {};
             keys.forEach(k => { map[k] = {}; });
 
@@ -2448,7 +2855,7 @@ function newFunction() {
         const restoreMultipliersFromBackup = () => {
             const backup = getSprCalcMultBackup();
             const mv = getSSDMultipliers();
-            SPR_LIST.forEach(k => {
+            getActivePrimaryCycleKeys().forEach(k => {
                 const v = Number(backup[k]);
                 mv[k] = Number.isFinite(v) ? v : (mv[k] || 1);
                 const el = document.getElementById('mult-' + k);
@@ -2535,8 +2942,8 @@ function newFunction() {
             const subtract = true;
             const { accepted: totalAccepted, required: totalRequired, proDPAccepted, proDPRequired } = currentTotals;
             let sprInputRows = '';
-            for (let si = 0; si < SPR_LIST.length; si++) {
-                const sk2 = SPR_LIST[si];
+            for (let si = 0; si < getActivePrimaryCycleKeys().length; si++) {
+                const sk2 = getActivePrimaryCycleKeys()[si];
                 sprInputRows +=
                     '<div style="display:grid;grid-template-columns:54px 1fr 1fr 1fr;gap:4px;align-items:center;margin:4px 0;">' +
                     '<label style="font-size:11px;color:#555;font-weight:bold;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(ssdLabel(sk2)) + '</label>' +
@@ -2553,8 +2960,8 @@ function newFunction() {
             let ssdRowsHtml = '';
             let totalReq = 0, totalAcc = 0, totalSoft = 0, totalHard = 0;
 
-            for (let ci = 0; ci < SSD_LIST.length; ci++) {
-                const sk = SSD_LIST[ci];
+            for (let ci = 0; ci < getActiveCycleKeys().length; ci++) {
+                const sk = getActiveCycleKeys()[ci];
                 const d = currentSSDData[sk];
                 const m = getCycleMultiplier(sk, multipliers);
                 const adj = adjustments[sk] || 0;
@@ -2748,9 +3155,7 @@ function newFunction() {
                 '<button id="soft-adj-reset-btn" style="width:100%;height:24px;padding:0 2px;background:#64b5f6;color:white;border:none;border-radius:4px;cursor:pointer;font-size:8px;font-weight:bold;box-sizing:border-box;line-height:11px;display:flex;align-items:center;justify-content:center;text-align:center;">Adjust<br>リセット</button>' +
                 '</div>' +
 
-                '<div style="margin-top:8px;padding-top:4px;border-top:2px solid #e3f2fd;">' +
-                c1c3InputHtml +
-                '</div>' +
+                (isEightSectorMode() ? '' : '<div style="margin-top:8px;padding-top:4px;border-top:2px solid #e3f2fd;">' + c1c3InputHtml + '</div>') +
                 '<div style="margin-top:8px;padding-top:4px;border-top:2px solid #e3f2fd;">' +
                 '<div style="display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:end;">' +
                 '<button id="spr-calc-btn" style="height:31px;padding:0 4px;background:#00897B;color:white;border:none;border-radius:4px;cursor:pointer;font-size:11px;font-weight:bold;box-sizing:border-box;line-height:1;white-space:nowrap;">SPR算出</button>' +
@@ -3027,7 +3432,7 @@ function newFunction() {
             setTimeout(syncPanelHeights, 0);
 
             // ---- イベント登録 ----
-            SPR_LIST.forEach(function (ssd) {
+            getActivePrimaryCycleKeys().forEach(function (ssd) {
                 const multEl = document.getElementById('mult-' + ssd);
                 const adjEl = document.getElementById('adj-' + ssd);
                 const softAdjEl = document.getElementById('soft-adj-' + ssd);
@@ -3101,6 +3506,14 @@ function newFunction() {
 
             var applySPRFromJson = function (json, showAlert) {
                 if (!json || json.length < 7) return;
+                if (isEightSectorMode()) {
+                    // 既存6 Sector形式のSPR/CVP値はSSDFへ推測マッピングしない。
+                    saveCvpVol(getCvpVolDefaults());
+                    renderSprCalcBody();
+                    applyDerivedSprToMultipliers();
+                    if (showAlert) alert('8 Sectorでは既存6 Sector形式のSPR/CVP値を割り当てません。\nSSDF名のActSPRシートだけを反映します。' + actSprMessage);
+                    return;
+                }
                 var headerRow = json[0];
                 var selectedText = getSelectedDateText();
                 var md = parseMonthDayFromText(selectedText);
@@ -3128,9 +3541,9 @@ function newFunction() {
                 if (colIdx < 0) {
                     // 該当日付なし：SPR/CVP全て0にする
                     var mv = getSSDMultipliers();
-                    for (var ri = 0; ri < SPR_LIST.length; ri++) {
-                        mv[SPR_LIST[ri]] = 0;
-                        var eli = document.getElementById('mult-' + SPR_LIST[ri]);
+                    for (var ri = 0; ri < getActivePrimaryCycleKeys().length; ri++) {
+                        mv[getActivePrimaryCycleKeys()[ri]] = 0;
+                        var eli = document.getElementById('mult-' + getActivePrimaryCycleKeys()[ri]);
                         if (eli) eli.value = '0.0';
                     }
                     saveSSDMultipliers(mv);
@@ -3145,7 +3558,7 @@ function newFunction() {
                     ov0['SSD_C1'] = 0;
                     ov0['SSD_C3'] = 0;
                     saveC1C3Overrides(ov0);
-                    saveCvpVol(Object.assign({}, CVP_VOL_DEFAULTS));
+                    saveCvpVol(getCvpVolDefaults());
                     refreshCycleValues();
                     renderSprCalcBody();
                     if (showAlert) alert('該当日付の列が見つかりません（' + md.month + '月' + md.day + '日）。SPR/CVPを0に設定しました。');
@@ -3154,7 +3567,7 @@ function newFunction() {
                 var mv = getSSDMultipliers();
                 for (var r = 1; r <= 6 && r < json.length; r++) {
                     var val = json[r][colIdx];
-                    var ssd = SPR_LIST[r - 1];
+                    var ssd = getActivePrimaryCycleKeys()[r - 1];
                     if (ssd) {
                         mv[ssd] = (val !== undefined && val !== null && val !== '') ? Math.round(Number(val) * 10) / 10 || 0 : 0;
                         var el = document.getElementById('mult-' + ssd);
@@ -3190,11 +3603,11 @@ function newFunction() {
 
                 // 19〜24行目: CVP Vol（SPR算出パネルのVol Gap用）
                 var cv = {};
-                for (var vi = 0; vi < SPR_LIST.length; vi++) {
+                for (var vi = 0; vi < getActivePrimaryCycleKeys().length; vi++) {
                     var vrow = json[18 + vi];
                     var vval = vrow ? vrow[colIdx] : null;
                     var vnum = (vval !== undefined && vval !== null && vval !== '') ? Math.round(Number(vval)) : 0;
-                    cv[SPR_LIST[vi]] = Number.isFinite(vnum) && vnum > 0 ? vnum : 0;
+                    cv[getActivePrimaryCycleKeys()[vi]] = Number.isFinite(vnum) && vnum > 0 ? vnum : 0;
                 }
                 saveCvpVol(cv);
 
@@ -3225,10 +3638,10 @@ function newFunction() {
             });
 
             document.getElementById('adj-reset-btn')?.addEventListener('click', function () {
-                const reset = Object.assign({}, SSD_ADJUSTMENT_DEFAULTS);
+                const reset = Object.assign({}, isEightSectorMode() ? SSDF_ADJUSTMENT_DEFAULTS : SSD_ADJUSTMENT_DEFAULTS);
                 saveSSDAdjustments(reset);
 
-                SPR_LIST.forEach(function (ssd) {
+                getActivePrimaryCycleKeys().forEach(function (ssd) {
                     const el = document.getElementById('adj-' + ssd);
                     if (el) el.value = 0;
                 });
@@ -3237,10 +3650,10 @@ function newFunction() {
             });
 
             document.getElementById('soft-adj-reset-btn')?.addEventListener('click', function () {
-                const reset = Object.assign({}, SSD_SOFT_ADJUSTMENT_DEFAULTS);
+                const reset = Object.assign({}, isEightSectorMode() ? SSDF_ADJUSTMENT_DEFAULTS : SSD_SOFT_ADJUSTMENT_DEFAULTS);
                 saveSSDSoftAdjustments(reset);
 
-                SPR_LIST.forEach(function (ssd) {
+                getActivePrimaryCycleKeys().forEach(function (ssd) {
                     const el = document.getElementById('soft-adj-' + ssd);
                     if (el) el.value = 0;
                 });
@@ -3301,7 +3714,7 @@ function newFunction() {
             // 日付変更時にキャッシュからSPR自動反映
             try {
                 var cached = localStorage.getItem('dsp-spr-excel-cache');
-                if (cached) {
+                if (cached && !isEightSectorMode()) {
                     var json = JSON.parse(cached);
                     if (json && json.length >= 7) {
                         var headerRow = json[0];
@@ -3329,7 +3742,7 @@ function newFunction() {
                                 var mv = getSSDMultipliers();
                                 for (var r = 1; r <= 6 && r < json.length; r++) {
                                     var val = json[r][colIdx];
-                                    var ssd = SPR_LIST[r - 1];
+                                    var ssd = getActivePrimaryCycleKeys()[r - 1];
                                     if (ssd) {
                                         mv[ssd] = (val !== undefined && val !== null && val !== '') ? Math.round(Number(val) * 10) / 10 || 0 : 0;
                                         var el = document.getElementById('mult-' + ssd);
