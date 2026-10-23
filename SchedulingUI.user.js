@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      19.3
+// @version      19.5
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -21,7 +21,7 @@ function newFunction() {
         // === スクリプトバージョン（ヘッダーの @version と同期） ===
         const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version)
             ? GM_info.script.version
-            : '19.3';
+            : '19.5';
 
         // === 同一開始時刻あたりの必須上限（Yard capacity / 超過でハイライト） ===
         const YARD_CAPACITY_DEFAULT = 15;
@@ -2618,7 +2618,7 @@ function newFunction() {
             // ---- Volume / CVP Vol / Vol Gap ----
             const cvpVol = getCvpVol();
             const applyOn = getSprCalcApply();
-            const gapCols = 'display:grid;grid-template-columns:' + NAME_W + 'px ' + SUM_W + 'px repeat(4,' + GAP_W + 'px) ' + ADJ_W + 'px;gap:1px;';
+            const gapCols = 'display:grid;width:' + gridWidth + 'px;grid-template-columns:' + NAME_W + 'px minmax(' + SUM_W + 'px,1fr) repeat(4,minmax(' + GAP_W + 'px,1fr)) minmax(' + ADJ_W + 'px,1fr);gap:1px;';
 
             html += sectionHeader('Volume / CVP Vol',
                 '<button id="sprcalc-apply-toggle" style="' + sprSmallBtnStyle(applyOn) + '">SPR反映 ' + (applyOn ? 'ON' : 'OFF') + '</button>',
@@ -2630,7 +2630,7 @@ function newFunction() {
                 '<span style="' + cellBase + 'background:#fbe9e7;color:#555;">CVP Vol</span>' +
                 '<span style="' + cellBase + 'background:#fbe9e7;color:#555;">Vol Gap</span>' +
                 '<span style="' + cellBase + 'background:#fbe9e7;color:#555;">Gap/SPR</span>' +
-                '<span style="' + cellBase + 'background:#fbe9e7;color:#555;white-space:normal;line-height:1.1;">adjust Vol Gap</span>' +
+                '<span style="' + cellBase + 'display:flex;align-items:center;justify-content:flex-end;text-align:right;background:#fbe9e7;color:#555;white-space:normal;line-height:1.1;">adjust Vol Gap</span>' +
                 '</div>';
 
             let volumeGrand = 0, cvpVolGrand = 0, adjVolumeGrand = 0;
