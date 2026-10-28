@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      19.5
+// @version      19.9
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -21,7 +21,7 @@ function newFunction() {
         // === スクリプトバージョン（ヘッダーの @version と同期） ===
         const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version)
             ? GM_info.script.version
-            : '19.5';
+            : '19.9';
 
         // === 同一開始時刻あたりの必須上限（Yard capacity / 超過でハイライト） ===
         const YARD_CAPACITY_DEFAULT = 15;
@@ -31,6 +31,7 @@ function newFunction() {
         // === 状態管理 ===
         let currentSSDData = null;
         let currentTimeDataList = [];
+        let currentBlockDataList = [];
         let currentTotals = { accepted: 0, required: 0, proDPAccepted: 0, proDPRequired: 0 };
         let isCalculating = false;
         let debounceTimer = null;
@@ -175,7 +176,15 @@ function newFunction() {
 
 
         // === ユーティリティ ===
-        const isServiceTypeName = (name) => name && name.includes('AmFlex');
+        const STANDARD_ROW_SERVICE_TYPES = new Set([
+            'Standard Parcel',
+            'Passenger Car Small',
+            'DSP Initiated Work (Standard Vehicle)'
+        ]);
+        const isServiceTypeName = (name) => {
+            const normalized = String(name || '').trim();
+            return normalized.includes('AmFlex') || STANDARD_ROW_SERVICE_TYPES.has(normalized);
+        };
 
         const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -314,20 +323,26 @@ function newFunction() {
                 seenModels.add(model);
                 models.push(model);
             };
-            const addContext = context => {
-                if (!context) return;
-                addModel(context.$data);
-                (context.$parents || []).forEach(addModel);
+            const getContext = node => {
+                if (typeof koApi.contextFor !== 'function') return null;
+                try { return koApi.contextFor(node); } catch (e) { return null; }
+            };
+            const addDataFor = node => {
+                if (typeof koApi.dataFor !== 'function') return;
+                try { addModel(koApi.dataFor(node)); } catch (e) { }
             };
 
-            // 行自身を優先し、必要に応じて祖先DOMの$data/$parentsとdataForも確認する。
-            for (let node = row; node && node.nodeType === 1; node = node.parentElement) {
-                if (typeof koApi.contextFor === 'function') {
-                    try { addContext(koApi.contextFor(node)); } catch (e) { }
-                }
-                if (typeof koApi.dataFor === 'function') {
-                    try { addModel(koApi.dataFor(node)); } catch (e) { }
-                }
+            // provider行自身のdirect modelを最優先し、そのcontextの祖先model、祖先DOMのmodelの順に確認する。
+            const rowContext = getContext(row);
+            if (rowContext) addModel(rowContext.$data);
+            addDataFor(row);
+            if (rowContext) (rowContext.$parents || []).forEach(addModel);
+
+            for (let node = row.parentElement; node && node.nodeType === 1; node = node.parentElement) {
+                const context = getContext(node);
+                if (context) addModel(context.$data);
+                addDataFor(node);
+                if (context) (context.$parents || []).forEach(addModel);
                 if (node.tagName === 'TABLE') break;
             }
 
@@ -343,6 +358,8 @@ function newFunction() {
         };
 
         const calculateDeliveryWindowEndMinutes = (startMinutes, blockLengthHours) => {
+            if (startMinutes === null || startMinutes === undefined || startMinutes === '') return null;
+            if (blockLengthHours === null || blockLengthHours === undefined || blockLengthHours === '') return null;
             const start = Number(startMinutes);
             const length = Number(blockLengthHours);
             if (!Number.isFinite(start) || start < 0 || start >= 1440 || !Number.isFinite(length) || length <= 0) return null;
@@ -350,10 +367,12 @@ function newFunction() {
         };
 
         const getSSDFGroup = (deliveryWindowEndMinutes) => {
-            if (deliveryWindowEndMinutes === null) return null;
+            if (deliveryWindowEndMinutes === null || deliveryWindowEndMinutes === undefined || deliveryWindowEndMinutes === '') return null;
+            const minutes = Number(deliveryWindowEndMinutes);
+            if (!Number.isFinite(minutes)) return null;
             for (let i = 0; i < SSDF_TIME_RANGES.length; i++) {
                 const r = SSDF_TIME_RANGES[i];
-                if (deliveryWindowEndMinutes >= r.min && deliveryWindowEndMinutes < r.max) return r.key;
+                if (minutes >= r.min && minutes < r.max) return r.key;
             }
             return null;
         };
@@ -369,6 +388,7 @@ function newFunction() {
         const calcVanCarCounts = (list) => {
             let vanReq = 0, vanAcc = 0, carReq = 0, carAcc = 0;
             (list || []).forEach(function (td) {
+                if (td.isDSP) return;
                 const n = String(td.serviceType || '').replace(/_/g, ' ');
                 if (/Car\s*Sml/i.test(n)) {
                     carReq += td.required || 0;
@@ -1177,6 +1197,7 @@ function newFunction() {
                 const rows = tbody.rows;
                 const rowCount = rows.length;
                 const timeDataList = [];
+                const blockDataList = [];
                 const ssdData = {};
                 getActiveCycleKeys().forEach(k => ssdData[k] = { required: 0, accepted: 0 });
 
@@ -1185,32 +1206,84 @@ function newFunction() {
                 let proDPAccepted = 0;
                 let proDPRequired = 0;
 
-                const readDspBoundNumber = (row, bindingPattern) => {
-                    const els = row.querySelectorAll('[data-bind]');
-                    let found = false;
-                    for (let i = 0; i < els.length; i++) {
-                        const db = els[i].getAttribute('data-bind') || '';
-                        if (!bindingPattern.test(db)) continue;
-                        found = true;
-                        const text = els[i].textContent.trim();
-                        if (DIGIT_REGEX.test(text)) return { found: true, value: +text };
+                const getDspTextBindingName = (dataBind) => {
+                    const source = String(dataBind || '');
+                    let start = 0;
+                    let braceDepth = 0;
+                    let bracketDepth = 0;
+                    let parenDepth = 0;
+                    let quote = '';
+                    let escaped = false;
+                    const parsePart = part => {
+                        const match = /^\s*text\s*:\s*([A-Za-z_$][\w$]*)\s*(?:\(\s*\))?\s*$/i.exec(part);
+                        return match ? match[1].toLowerCase() : '';
+                    };
+                    for (let i = 0; i <= source.length; i++) {
+                        const char = source[i];
+                        if (quote) {
+                            if (escaped) escaped = false;
+                            else if (char === '\\') escaped = true;
+                            else if (char === quote) quote = '';
+                            continue;
+                        }
+                        if (char === '"' || char === "'") { quote = char; continue; }
+                        if (char === '{') braceDepth++;
+                        else if (char === '}') braceDepth = Math.max(0, braceDepth - 1);
+                        else if (char === '[') bracketDepth++;
+                        else if (char === ']') bracketDepth = Math.max(0, bracketDepth - 1);
+                        else if (char === '(') parenDepth++;
+                        else if (char === ')') parenDepth = Math.max(0, parenDepth - 1);
+                        if ((char === ',' || i === source.length) && braceDepth === 0 && bracketDepth === 0 && parenDepth === 0) {
+                            const name = parsePart(source.slice(start, i));
+                            if (name) return name;
+                            start = i + 1;
+                        }
                     }
-                    return { found, value: 0 };
+                    return '';
+                };
+
+                const readDspCellBoundNumber = (row, cellIndex, bindingNames) => {
+                    const cell = row && row.cells ? row.cells[cellIndex] : null;
+                    if (!cell) return { found: false, hasValue: false, value: 0 };
+                    const elements = [cell];
+                    const descendants = cell.querySelectorAll('[data-bind]');
+                    for (let i = 0; i < descendants.length; i++) elements.push(descendants[i]);
+                    let found = false;
+                    for (let i = 0; i < elements.length; i++) {
+                        const bindingName = getDspTextBindingName(elements[i].getAttribute('data-bind'));
+                        if (!bindingNames.includes(bindingName)) continue;
+                        found = true;
+                        const text = elements[i].textContent.trim();
+                        const valueMatch = /^\s*([\d,]+)/.exec(text);
+                        if (valueMatch) return { found: true, hasValue: true, value: Number(valueMatch[1].replace(/,/g, '')) || 0 };
+                    }
+                    return { found, hasValue: false, value: 0 };
                 };
 
                 const extractDspQuantities = (row) => ({
-                    required: readDspBoundNumber(row, /\brequired\s*\(\s*\)/i),
-                    pending: readDspBoundNumber(row, /\b(?:pending|printPending)\s*\(\s*\)/i),
-                    accepted: readDspBoundNumber(row, /\b(?:scheduled|confirmed|printConfirmed)\s*\(\s*\)/i)
+                    required: readDspCellBoundNumber(row, 5, ['required', 'totalrequired']),
+                    pending: readDspCellBoundNumber(row, 6, ['pending', 'printpending']),
+                    accepted: readDspCellBoundNumber(row, 7, ['confirmed', 'printconfirmed'])
                 });
 
-                const resolveDspSSDGroup = (name) => {
-                    const raw = String(name === undefined || name === null ? '' : name).trim();
-                    if (!raw) return null;
-                    const normalized = raw.replace(/[\s-]+/g, '_').toUpperCase();
-                    for (let i = 0; i < getActiveCycleKeys().length; i++) {
-                        const key = getActiveCycleKeys()[i];
-                        if (key === normalized || String(ssdLabel(key)).trim().toLowerCase() === raw.toLowerCase()) return key;
+                const extractDspProviderData = (row) => {
+                    if (!row || row.querySelector('.flexWaveGroup')) return null;
+                    const timeCell = row.cells && row.cells[4];
+                    if (!timeCell) return null;
+                    const elements = [timeCell];
+                    const descendants = timeCell.querySelectorAll('[data-bind]');
+                    for (let i = 0; i < descendants.length; i++) elements.push(descendants[i]);
+                    for (let i = 0; i < elements.length; i++) {
+                        const db = elements[i].getAttribute('data-bind') || '';
+                        if (!/\bproviderStartTime\s*\(\s*\)/i.test(db)) continue;
+                        const timeMatch = TIME_REGEX.exec(elements[i].textContent.trim());
+                        if (!timeMatch) return null;
+                        const timeText = timeMatch[0];
+                        return {
+                            providerName: row.cells[3] ? row.cells[3].textContent.trim() : '',
+                            timeText,
+                            timeMinutes: parseTime(timeText)
+                        };
                     }
                     return null;
                 };
@@ -1226,11 +1299,24 @@ function newFunction() {
                     serviceTypeIndices.push({
                         index: i,
                         name,
-                        isFlex: isServiceTypeName(name),
-                        isDSP: !isServiceTypeName(name),
+                        isFlex: false,
+                        isDSP: false,
                         isProDP: name.includes('ProDP')
                     });
                 }
+                serviceTypeIndices.forEach((serviceType, serviceIndex) => {
+                    const endIndex = serviceIndex + 1 < serviceTypeIndices.length
+                        ? serviceTypeIndices[serviceIndex + 1].index
+                        : rowCount;
+                    for (let i = serviceType.index + 1; i < endIndex; i++) {
+                        const className = rows[i].className || '';
+                        if (className.includes('dspRow') && rows[i].querySelector('.dspWaveGroup')) {
+                            serviceType.isDSP = true;
+                            break;
+                        }
+                    }
+                    serviceType.isFlex = !serviceType.isDSP && isServiceTypeName(serviceType.name);
+                });
 
                 // 期間（Length）は timeWindowRow に表示されるため、行位置を先に収集して継承する
                 const durationIndices = [];
@@ -1248,16 +1334,12 @@ function newFunction() {
                 let serviceTypeIdx = 0;
                 let currentDuration = '';
                 let durationIdx = 0;
-                let currentDspCycleText = '';
-                let currentDspSSDGroup = null;
                 let currentDspDemand = null;
 
                 for (let i = 0; i < rowCount; i++) {
                     while (serviceTypeIdx < serviceTypeIndices.length && serviceTypeIndices[serviceTypeIdx].index <= i) {
                         currentServiceType = serviceTypeIndices[serviceTypeIdx++];
                         currentDuration = '';
-                        currentDspCycleText = '';
-                        currentDspSSDGroup = null;
                         currentDspDemand = null;
                     }
                     while (durationIdx < durationIndices.length && durationIndices[durationIdx].index <= i) {
@@ -1271,26 +1353,20 @@ function newFunction() {
                     if (currentServiceType?.isDSP) {
                         const waveGroupEl = row.querySelector('.dspWaveGroup');
                         if (waveGroupEl) {
-                            currentDspCycleText = waveGroupEl.textContent.trim();
-                            currentDspSSDGroup = isEightSectorMode() ? null : resolveDspSSDGroup(currentDspCycleText);
                             currentDspDemand = null;
                             continue;
                         }
 
                         if (rowClassName.includes('providerRow')) {
-                            if (!currentDspDemand) continue;
-                            const providerData = extractRowData(row);
-                            if (!providerData.timeText) continue;
+                            if (!currentDspDemand || row.querySelector('.flexWaveGroup')) continue;
+                            const providerData = extractDspProviderData(row);
+                            if (!providerData) continue;
                             const quantities = extractDspQuantities(row);
-                            if (isEightSectorMode() && currentDspDemand.deliveryWindowEndMinutes === null) {
-                                const providerDeliveryWindowEndMinutes = getDeliveryWindowEndMinutes(row);
-                                if (providerDeliveryWindowEndMinutes !== null) {
-                                    currentDspDemand.deliveryWindowEndMinutes = providerDeliveryWindowEndMinutes;
-                                    currentDspDemand.ssdGroup = getSSDFGroup(providerDeliveryWindowEndMinutes);
-                                }
-                            }
                             currentDspDemand.providers.push({
+                                providerName: providerData.providerName,
                                 timeText: providerData.timeText,
+                                timeMinutes: providerData.timeMinutes,
+                                deliveryWindowEndMinutes: isEightSectorMode() ? getDeliveryWindowEndMinutes(row) : null,
                                 required: quantities.required,
                                 pending: quantities.pending.value,
                                 accepted: quantities.accepted.value
@@ -1299,24 +1375,23 @@ function newFunction() {
                         }
 
                         if (rowClassName.includes('dspRow')) {
+                            currentDspDemand = null;
                             const quantities = extractDspQuantities(row);
                             if (!quantities.required.found) continue;
-                            const deliveryWindowEndMinutes = isEightSectorMode() ? getDeliveryWindowEndMinutes(row) : null;
                             currentDspDemand = {
                                 serviceType: currentServiceType,
                                 blockLength: currentDuration,
-                                cycleText: currentDspCycleText,
-                                deliveryWindowEndMinutes,
-                                ssdGroup: isEightSectorMode() ? getSSDFGroup(deliveryWindowEndMinutes) : currentDspSSDGroup,
                                 required: quantities.required.value,
                                 accepted: quantities.accepted.value,
-                                acceptedFound: quantities.accepted.found,
+                                acceptedFound: quantities.accepted.hasValue,
                                 providers: []
                             };
                             dspDemands.push(currentDspDemand);
                         }
                         continue;
                     }
+
+                    if (currentServiceType && !currentServiceType.isFlex && !currentServiceType.isProDP) continue;
 
                     // 6 Sectorは開始時刻、8 Sectorは行のKnockoutモデル上のdeliveryWindowEndで分類する。
                     const { timeText, requiredValue, acceptedValue, cycleText, blockLength } = extractRowData(row);
@@ -1337,7 +1412,7 @@ function newFunction() {
                     }
                     const ssdGroup = isEightSectorMode() ? getSSDFGroup(deliveryWindowEndMinutes) : getSSDGroup(timeMinutes);
 
-                    timeDataList.push({
+                    const rowData = {
                         time: timeText,
                         timeMinutes,
                         deliveryWindowEndMinutes,
@@ -1347,7 +1422,9 @@ function newFunction() {
                         required: requiredValue,
                         accepted: acceptedValue,
                         ssdGroup
-                    });
+                    };
+                    timeDataList.push(rowData);
+                    blockDataList.push(rowData);
 
                     if (ssdGroup) {
                         ssdData[ssdGroup].required += requiredValue;
@@ -1358,18 +1435,11 @@ function newFunction() {
                     totalRequired += requiredValue;
                 }
 
-                // DSPはdspDemand行をCycle集計の正本とし、親wave集計行は加算しない。
-                // 開始時刻別はprovider明細だけを使い、親requiredはpending+confirmedの範囲で一度だけ配分する。
+                // DSPは需要上限でcapしたprovider明細をCycle・Block・開始時刻別の共通正本とする。
+                // 親Wave、子需要、未割当残数はCycleやBlockへ追加しない。
                 dspDemands.forEach(demand => {
-                    if (isEightSectorMode() && demand.deliveryWindowEndMinutes === null) {
-                        const firstTimedProvider = demand.providers.find(provider => provider.timeText);
-                        const startMinutes = firstTimedProvider ? parseTime(firstTimedProvider.timeText) : null;
-                        demand.deliveryWindowEndMinutes = calculateDeliveryWindowEndMinutes(startMinutes, demand.blockLength);
-                        demand.ssdGroup = getSSDFGroup(demand.deliveryWindowEndMinutes);
-                    }
-
-                    const providerAccepted = demand.providers.reduce((sum, provider) => sum + provider.accepted, 0);
-                    const demandAccepted = demand.acceptedFound ? demand.accepted : providerAccepted;
+                    const providerAccepted = demand.providers.reduce((sum, provider) => sum + Math.max(0, provider.accepted), 0);
+                    const demandAccepted = demand.acceptedFound ? Math.max(0, demand.accepted) : providerAccepted;
 
                     if (demand.serviceType.isProDP) {
                         proDPRequired += demand.required;
@@ -1379,32 +1449,45 @@ function newFunction() {
 
                     totalRequired += demand.required;
                     totalAccepted += demandAccepted;
-                    if (demand.ssdGroup) {
-                        ssdData[demand.ssdGroup].required += demand.required;
-                        ssdData[demand.ssdGroup].accepted += demandAccepted;
-                    }
 
-                    let remainingRequired = demand.required;
+                    let remainingRequired = Math.max(0, demand.required);
                     let remainingAccepted = demandAccepted;
                     demand.providers.forEach(provider => {
-                        const providerRequiredBase = provider.required.found
+                        const providerRequiredBase = provider.required.hasValue
                             ? provider.required.value
                             : provider.pending + provider.accepted;
                         const providerRequired = Math.min(remainingRequired, Math.max(0, providerRequiredBase));
                         const providerAcceptedValue = Math.min(remainingAccepted, Math.max(0, provider.accepted));
-                        const timeMinutes = parseTime(provider.timeText);
-
-                        timeDataList.push({
+                        const directDeliveryWindowEndMinutes = provider.deliveryWindowEndMinutes;
+                        const deliveryWindowEndMinutes = isEightSectorMode()
+                            ? (directDeliveryWindowEndMinutes !== null
+                                ? directDeliveryWindowEndMinutes
+                                : calculateDeliveryWindowEndMinutes(provider.timeMinutes, demand.blockLength))
+                            : null;
+                        const ssdGroup = isEightSectorMode()
+                            ? getSSDFGroup(deliveryWindowEndMinutes)
+                            : getSSDGroup(provider.timeMinutes);
+                        const rowData = {
                             time: provider.timeText,
-                            timeMinutes,
-                            deliveryWindowEndMinutes: demand.deliveryWindowEndMinutes,
+                            timeMinutes: provider.timeMinutes,
+                            deliveryWindowEndMinutes,
+                            providerDeliveryWindowEndMinutes: directDeliveryWindowEndMinutes,
+                            providerName: provider.providerName,
                             serviceType: demand.serviceType.name,
-                            cycle: isEightSectorMode() ? (demand.ssdGroup || '') : (demand.cycleText || demand.ssdGroup || ''),
+                            cycle: ssdGroup || '',
                             blockLength: demand.blockLength,
                             required: providerRequired,
                             accepted: providerAcceptedValue,
-                            ssdGroup: demand.ssdGroup
-                        });
+                            ssdGroup,
+                            isDSP: true
+                        };
+                        timeDataList.push(rowData);
+                        blockDataList.push(rowData);
+
+                        if (ssdGroup) {
+                            ssdData[ssdGroup].required += providerRequired;
+                            ssdData[ssdGroup].accepted += providerAcceptedValue;
+                        }
 
                         remainingRequired -= providerRequired;
                         remainingAccepted -= providerAcceptedValue;
@@ -1413,6 +1496,7 @@ function newFunction() {
 
                 currentSSDData = ssdData;
                 currentTimeDataList = timeDataList;
+                currentBlockDataList = blockDataList;
                 currentTotals = { accepted: totalAccepted, required: totalRequired, proDPAccepted, proDPRequired };
 
                 const now = new Date();
@@ -1423,7 +1507,8 @@ function newFunction() {
                     m: getCycleMode(),
                     d: getSelectedDateText(),
                     s: ssdData,
-                    t: timeDataList.map(td => [td.timeMinutes, td.deliveryWindowEndMinutes, td.ssdGroup, td.serviceType, td.blockLength, td.required, td.accepted]),
+                    t: timeDataList.map(td => [td.timeMinutes, td.deliveryWindowEndMinutes, td.providerDeliveryWindowEndMinutes, td.ssdGroup, td.cycle, td.serviceType, td.providerName, td.blockLength, td.required, td.accepted, td.isDSP]),
+                    b: blockDataList.map(td => [td.ssdGroup, td.serviceType, td.blockLength, td.required, td.accepted, td.isDSP]),
                     o: currentTotals
                 });
 
@@ -1736,7 +1821,7 @@ function newFunction() {
                 if (delta === 0) return; // 行の除外条件はこれだけ（Adjust 後が 0 台の行も出力する）
                 const req = Math.max(0, (td.required || 0) + delta);
                 const timeParts = getTimeParts(td.timeMinutes);
-                const cycle = isEightSectorMode() ? (td.ssdGroup || '') : (td.cycle || '');
+                const cycle = (isEightSectorMode() || td.isDSP) ? (td.ssdGroup || '') : (td.cycle || '');
                 const len = (td.blockLength === '' || td.blockLength === undefined || td.blockLength === null)
                     ? '' : Number(td.blockLength);
                 exportRows.push([
@@ -1749,7 +1834,9 @@ function newFunction() {
                     len,
                     req
                 ]);
-                const validCycle = isEightSectorMode() ? /^SSDF_[1-8]$/.test(cycle) : /^CYCLE/i.test(cycle);
+                const validCycle = (isEightSectorMode() || td.isDSP)
+                    ? getActivePrimaryCycleKeys().includes(cycle)
+                    : /^CYCLE/i.test(cycle);
                 if (!validCycle || len === '') {
                     suspect.push(minutesToHHMM(td.timeMinutes) + ' / Cycle ' + (cycle || '(空)') +
                         ' / Length ' + (len === '' ? '(空)' : len));
@@ -2427,6 +2514,7 @@ function newFunction() {
                 refreshSSDLabelCache();
                 currentSSDData = null;
                 currentTimeDataList = [];
+                currentBlockDataList = [];
                 lastRenderSignature = '';
                 calculateAndDisplay();
                 openTimeRangeSettings();
@@ -2459,20 +2547,29 @@ function newFunction() {
             const map = {};
             keys.forEach(k => { map[k] = {}; });
 
-            const applyAdjust = !!useAdjust && basis !== 'accepted';
-            const adjust = applyAdjust ? getTimeReqAdjust() : null;
-            const adjKeyMap = applyAdjust ? buildTimeAdjKeyMap() : null;
-
             const lenSet = {};
-            (currentTimeDataList || []).forEach(td => {
+            (currentBlockDataList || []).forEach(td => {
                 const k = td.ssdGroup;
                 if (!k || !map[k]) return;
                 const lenKey = lenKeyOf(td);
                 lenSet[lenKey] = true;
-                let v = basis === 'accepted' ? (td.accepted || 0) : (td.required || 0);
-                if (applyAdjust) v = Math.max(0, v + (adjust[adjKeyMap.get(td)] || 0));
+                const v = basis === 'accepted' ? (td.accepted || 0) : (td.required || 0);
                 map[k][lenKey] = (map[k][lenKey] || 0) + v;
             });
+
+            const applyAdjust = !!useAdjust && basis === 'required';
+            if (applyAdjust) {
+                const adjust = getTimeReqAdjust();
+                const adjKeyMap = buildTimeAdjKeyMap();
+                (currentTimeDataList || []).forEach(td => {
+                    const k = td.ssdGroup;
+                    if (!k || !map[k]) return;
+                    const lenKey = lenKeyOf(td);
+                    const required = td.required || 0;
+                    const adjusted = Math.max(0, required + (adjust[adjKeyMap.get(td)] || 0));
+                    map[k][lenKey] = (map[k][lenKey] || 0) + adjusted - required;
+                });
+            }
 
             const lengths = Object.keys(lenSet).sort((a, b) => {
                 if (a === '-') return 1;
