@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      19.9
+// @version      20.1
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -21,7 +21,7 @@ function newFunction() {
         // === スクリプトバージョン（ヘッダーの @version と同期） ===
         const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version)
             ? GM_info.script.version
-            : '19.9';
+            : '19.10';
 
         // === 同一開始時刻あたりの必須上限（Yard capacity / 超過でハイライト） ===
         const YARD_CAPACITY_DEFAULT = 15;
@@ -3094,21 +3094,22 @@ function newFunction() {
             // ---- 右パネル：開始時刻別 ----
             const sortedTimeData = sortTimeDataForPanel(currentTimeDataList);
 
-            // 同じ開始時刻ごとの必須合計（Yard capacity 超過判定用）
             const yardCapacity = getYardCapacity();
-            const requiredByTime = {};
-            for (let ri = 0; ri < sortedTimeData.length; ri++) {
-                const key = sortedTimeData[ri].timeMinutes;
-                requiredByTime[key] = (requiredByTime[key] || 0) + (sortedTimeData[ri].required || 0);
-            }
-
-            // 必須のadjust（行ごと / SPR算出パネルのBlock数にのみ反映）
+            // Yard capacity 超過判定でも使用する必須adjust（行ごと）
             const timeAdjKeyMap = buildTimeAdjKeyMap();
 
             // === 開始時刻別パネル描画 ===
             const buildTimePanelHtml = (showAdjust) => {
                 // 再描画のたびに最新値を読む（トグルで入力値が消えないように）
                 const timeAdjValues = getTimeReqAdjust();
+                const adjustedRequiredByTime = {};
+                for (let ri = 0; ri < sortedTimeData.length; ri++) {
+                    const td = sortedTimeData[ri];
+                    const delta = normalizeTimeAdjDelta(timeAdjValues[timeAdjKeyMap.get(td)]);
+                    const adjustedRequired = Math.max(0, Number(td.required || 0) + delta);
+                    const key = td.timeMinutes;
+                    adjustedRequiredByTime[key] = (adjustedRequiredByTime[key] || 0) + adjustedRequired;
+                }
                 const timeGridCols = showAdjust
                     ? '60px 44px 132px 40px 38px 38px 42px'
                     : '60px 44px 132px 40px 38px 38px';
@@ -3116,7 +3117,7 @@ function newFunction() {
                 for (let ti = 0; ti < sortedTimeData.length; ti++) {
                     const td = sortedTimeData[ti];
                     const lengthText = (td.blockLength === '' || td.blockLength === undefined || td.blockLength === null) ? '-' : td.blockLength;
-                    const timeTotal = requiredByTime[td.timeMinutes] || 0;
+                    const timeTotal = adjustedRequiredByTime[td.timeMinutes] || 0;
                     const isOver = timeTotal > yardCapacity;
                     const rowStyle = isOver
                         ? 'background:#ffebee;border-left:3px solid #f44336;'
@@ -3319,12 +3320,13 @@ function newFunction() {
             // rightPanel を独立したスタッキングコンテキストにし、sticky ヘッダの z-index を右パネル内に閉じ込める
             rightPanel.style.cssText = 'position:relative;z-index:0;padding:0 8px 6px;overflow-y:auto;overflow-x:hidden;box-sizing:border-box;';
 
-            // 開始時刻別の必須 adjust（SPR算出パネルのみ再描画）
+            // 開始時刻別の必須 adjust
             const bindTimePanelEvents = function () {
                 rightPanel.querySelectorAll('.dsp-time-adj').forEach(function (el) {
                     el.addEventListener('change', function () {
                         const key = this.getAttribute('data-key');
                         if (!key) return;
+                        const scrollTop = rightPanel.scrollTop;
                         const values = getTimeReqAdjust();
                         const raw = String(this.value).trim();
                         const v = raw === '' ? 0 : normalizeTimeAdjDelta(raw);
@@ -3336,13 +3338,15 @@ function newFunction() {
                             this.value = String(v);
                         }
                         saveTimeReqAdjust(values);
+                        renderTimePanel(scrollTop);
                         renderSprCalcBody();
                     });
                 });
 
                 rightPanel.querySelector('#time-adj-clear')?.addEventListener('click', function () {
+                    const scrollTop = rightPanel.scrollTop;
                     saveTimeReqAdjust({});
-                    rightPanel.querySelectorAll('.dsp-time-adj').forEach(function (el) { el.value = ''; });
+                    renderTimePanel(scrollTop);
                     renderSprCalcBody();
                 });
 
@@ -3355,13 +3359,14 @@ function newFunction() {
             };
 
             // Adjust 列（+ Adjustクリア）は SPR算出パネルが開いているときだけ出力する
-            const renderTimePanel = function () {
+            const renderTimePanel = function (scrollTop) {
                 const showAdjust = getSprCalcPanelOpen();
                 rightPanel.innerHTML = buildTimePanelHtml(showAdjust);
                 const w = showAdjust ? 470 : 420;
                 rightPanel.style.width = w + 'px';
                 rightPanel.style.minWidth = w + 'px';
                 bindTimePanelEvents();
+                if (Number.isFinite(scrollTop)) rightPanel.scrollTop = scrollTop;
             };
             renderTimePanel();
 
