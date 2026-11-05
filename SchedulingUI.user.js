@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      20.5
+// @version      20.6
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -22,7 +22,7 @@ function newFunction() {
         // === スクリプトバージョン（ヘッダーの @version と同期） ===
         const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version)
             ? GM_info.script.version
-            : '20.5';
+            : '20.6';
 
         // === 同一開始時刻あたりの必須上限（Yard capacity / 超過でハイライト） ===
         const YARD_CAPACITY_DEFAULT = 15;
@@ -3912,6 +3912,20 @@ function newFunction() {
                     const el = document.getElementById('adj-' + ssd);
                     if (el) el.value = 0;
                 });
+
+                // 6 SectorのCVP Buffer（下段の赤枠4項目）も保存値ごと0へ戻す
+                if (!isEightSectorMode()) {
+                    const ov = getC1C3Overrides();
+                    CVP_BUFFER_OVERRIDE_KEYS.forEach(function (key) {
+                        ov[key] = 0;
+                    });
+                    saveC1C3Overrides(ov);
+
+                    ['cvp-buf-1', 'cvp-buf-1b', 'cvp-buf-3b', 'cvp-buf-4'].forEach(function (id) {
+                        const el = document.getElementById(id);
+                        if (el) el.value = 0;
+                    });
+                }
 
                 refreshCycleValues();
             });
