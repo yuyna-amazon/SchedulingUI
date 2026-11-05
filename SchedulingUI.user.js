@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      20.1
+// @version      20.5
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -10,6 +10,7 @@
 // @downloadURL  https://raw.githubusercontent.com/yuyna-amazon/SchedulingUI/main/SchedulingUI.user.js
 // @grant        none
 // @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
+// @require      https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js
 // ==/UserScript==
 
 newFunction();
@@ -21,7 +22,7 @@ function newFunction() {
         // === スクリプトバージョン（ヘッダーの @version と同期） ===
         const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version)
             ? GM_info.script.version
-            : '19.10';
+            : '20.5';
 
         // === 同一開始時刻あたりの必須上限（Yard capacity / 超過でハイライト） ===
         const YARD_CAPACITY_DEFAULT = 15;
@@ -56,7 +57,14 @@ function newFunction() {
         const DIGIT_REGEX = /^\d+$/;
         const DECIMAL_REGEX = /^\d+(?:\.\d+)?$/;
         const DURATION_REGEX = /^(\d+(?:\.\d+)?)\s*hours?$/i;
-        const DATE_REGEX = /(\d+)-(\d+)月/;
+        const JP_DATE_REGEX = /(\d+)-(\d+)月/;
+        const EN_DATE_REGEX = /\b(\d{1,2})-([A-Za-z]{3,9})\b/i;
+        const EN_MONTHS = Object.freeze({
+            jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3,
+            apr: 4, april: 4, may: 5, jun: 6, june: 6, jul: 7, july: 7,
+            aug: 8, august: 8, sep: 9, sept: 9, september: 9,
+            oct: 10, october: 10, nov: 11, november: 11, dec: 12, december: 12
+        });
         const REQUIRED_REGEX = /text:\s*required\(\)/;
         const SCHEDULED_REGEX = /text:\s*scheduled\(\)/;
         const CYCLE_TEXT_REGEX = /\b(CYCLE[\s_-]*[A-Z0-9_]+)\b/i;
@@ -166,12 +174,46 @@ function newFunction() {
         const SPR_TEMPLATE_8_NAME = 'Daily SPR設定_8Sector.xlsx';
         const SPR_TEMPLATE_8_URL = 'https://drive.corp.amazon.com/documents/yuyna@/Daily%20SPR%E8%A8%AD%E5%AE%9A_8Sector.xlsx';
 
+        // === Cap Set Fileテンプレート ===
+        const CAP_SET_TEMPLATE_URL = 'https://amazon.awsapps.com/workdocs-amazon/index.html#/document/c26cf02264749b290c47c8f444d377c428eb7d762d5bb220483d70dd03cab162';
+        const CAP_SET_REASON_OPTIONS = Object.freeze([
+            'Increase - OTR Capacity Adjustment',
+            'Increase - UTR Capacity Adjustment',
+            'Increase - Volume acquisition',
+            'Increase - CVP attainment',
+            'Increase - Over Route recovery',
+            'Increase - Core injection',
+            'Increase - SSD-G',
+            'Decrease - OTR capacity',
+            'Decrease - UTR capacity',
+            'Decrease - Break prevention',
+            'Decrease - Core injection',
+            'Decrease - SSD-G',
+            'Increase - Other理由を明記してください',
+            'Decrease - Other 理由を明記してください',
+            'COSI Weekly Setting'
+        ]);
+        const CAP_SET_CYCLE_OPTIONS = Object.freeze([
+            'SSD_1', 'SSD_1_B', 'SSD_2', 'SSD_3', 'SSD_3_B', 'SSD_4',
+            'SSD_5', 'SSD_6', 'SSD_7', 'SSD_8', 'SSD_C1', 'SSD_C3',
+            'SSDF_1', 'SSDF_2', 'SSDF_3', 'SSDF_4', 'SSDF_5', 'SSDF_6', 'SSDF_7', 'SSDF_8'
+        ]);
+        const CAP_SET_NOTES = Object.freeze([
+            '※調整したいStation、Cycle、Soft Caps、Hard Capsの値を入力してください',
+            '※半角文字で入力してください',
+            '※Capsの数値にカンマ等を入れないでください',
+            '※reasonに該当がない場合は直接理由を記載してください。',
+            '※SSD_5~8は現在8CycleNode限定です。',
+            '※Tier2 NodeはSSD1/2/3を使用してください',
+            '※VFK1/VIT1はSSD1~4'
+        ]);
+
         // === Fillサマリー設定 ===
         const FILL_DAYS_DEFAULT = 7;
         const FILL_DAYS_MIN = 1;
         const FILL_DAYS_MAX = 31;
 
-        // CVP出力の Node 列（拠点コード）。出所は caps 出力（downloadExcel）でハードコードしている 'VFK1' と同じ
+        // CVP出力のNode列で使用する既定拠点コード
         const CVP_EXPORT_NODE = 'VFK1';
 
 
@@ -184,6 +226,12 @@ function newFunction() {
         const isServiceTypeName = (name) => {
             const normalized = String(name || '').trim();
             return normalized.includes('AmFlex') || STANDARD_ROW_SERVICE_TYPES.has(normalized);
+        };
+
+        const getStationCodeFromSelectorTitle = () => {
+            const title = document.querySelector('.selectorTitle')?.textContent?.trim() || '';
+            const match = /\(([A-Z0-9]{3,8})\)/i.exec(title);
+            return match ? match[1].toUpperCase() : '';
         };
 
         const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -817,10 +865,8 @@ function newFunction() {
         // === 日付 ===
         const getDateForFileName = () => {
             const span = document.querySelector('li.selected .dateText');
-            if (span) {
-                const match = DATE_REGEX.exec(span.textContent);
-                if (match) return match[2].padStart(2, '0') + match[1].padStart(2, '0');
-            }
+            const md = parseMonthDayFromText(span?.textContent || '');
+            if (md) return String(md.month).padStart(2, '0') + String(md.day).padStart(2, '0');
             const d = new Date();
             return String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0');
         };
@@ -835,7 +881,7 @@ function newFunction() {
             const li = document.querySelector('li.selected');
             if (!li) return '';
             const raw = li.querySelector('.dateText')?.textContent?.trim() || '';
-            const match = DATE_REGEX.exec(raw);
+            const match = JP_DATE_REGEX.exec(raw);
             if (!match) return raw;
             const day = match[1];
             const month = match[2];
@@ -851,11 +897,22 @@ function newFunction() {
             (date.getMonth() + 1) + '月' + date.getDate() + '日（' + JP_DOW[date.getDay()] + '）';
 
         const parseMonthDayFromText = (text) => {
-            const match = DATE_REGEX.exec(text || '');
-            if (!match) return null;
+            const value = String(text || '').trim();
+            const jpMatch = JP_DATE_REGEX.exec(value);
+            if (jpMatch) {
+                return {
+                    day: Number(jpMatch[1]),
+                    month: Number(jpMatch[2])
+                };
+            }
+
+            const enMatch = EN_DATE_REGEX.exec(value);
+            if (!enMatch) return null;
+            const month = EN_MONTHS[enMatch[2].toLowerCase()];
+            if (!month) return null;
             return {
-                day: Number(match[1]),
-                month: Number(match[2])
+                day: Number(enMatch[1]),
+                month
             };
         };
 
@@ -930,7 +987,14 @@ function newFunction() {
                 for (let j = 0; j < ths.length; j++) {
                     const thText = ths[j].textContent.trim();
                     const thTitle = ths[j].title || '';
-                    if (thText.includes('受諾済み') || thTitle.includes('承諾され')) {
+                    const normalizedText = thText.toLowerCase();
+                    const normalizedTitle = thTitle.toLowerCase();
+                    if (
+                        thText.includes('受諾済み') ||
+                        thTitle.includes('承諾され') ||
+                        normalizedText === 'accepted' ||
+                        normalizedTitle.includes('accepted')
+                    ) {
                         cachedTable = tables[i];
                         return cachedTable;
                     }
@@ -1679,9 +1743,13 @@ function newFunction() {
         };
 
         // === Excel ===
-        const downloadExcel = () => {
+        const downloadExcel = async () => {
             if (!currentSSDData) {
                 alert('データがありません');
+                return;
+            }
+            if (typeof ExcelJS === 'undefined') {
+                alert('Cap Set File作成ライブラリを読み込めませんでした。ページを再読み込みしてください。');
                 return;
             }
 
@@ -1693,28 +1761,125 @@ function newFunction() {
             const hardPct = getHardPct();
             const subtract = true;
 
-            const wsData = [['Station', 'Cycle', 'Soft Caps', 'Hard Caps']];
+            try {
+                const workbook = new ExcelJS.Workbook();
+                workbook.creator = 'SchedulingUI';
+                workbook.subject = CAP_SET_TEMPLATE_URL;
 
-            // SSD_C1 / SSD_C3 は出力しない
-            for (const ssd of getActivePrimaryCycleKeys()) {
-                const d = currentSSDData[ssd];
-                const m = getCycleMultiplier(ssd, multipliers);
-                const adj = adjustments[ssd] || 0;
-                const softAdj = softAdjustments[ssd] || 0;
-                const baseAcc = getBaseAccepted(ssd, d, overrides);
-                const soft = calculateCycleSoft(ssd, baseAcc, adj, m, pct, overrides, subtract, softAdj, currentSSDData, multipliers);
+                const worksheet = workbook.addWorksheet('Sheet1');
+                worksheet.addRow(['Station', 'Cycle', 'Soft Caps', 'Hard Caps', 'reason']);
+                const templateFont = { name: '游ゴシック', size: 11, color: { argb: 'FF000000' } };
+                const stationCode = getStationCodeFromSelectorTitle();
 
-                wsData.push(['VFK1', ssdLabel(ssd), soft, Math.round(soft * (1 + hardPct / 100))]);
+                // SSD_C1 / SSD_C3 は出力しない
+                for (const ssd of getActivePrimaryCycleKeys()) {
+                    const d = currentSSDData[ssd];
+                    const m = getCycleMultiplier(ssd, multipliers);
+                    const adj = adjustments[ssd] || 0;
+                    const softAdj = softAdjustments[ssd] || 0;
+                    const baseAcc = getBaseAccepted(ssd, d, overrides);
+                    const soft = calculateCycleSoft(ssd, baseAcc, adj, m, pct, overrides, subtract, softAdj, currentSSDData, multipliers);
+
+                    const row = worksheet.addRow([
+                        stationCode,
+                        ssdLabel(ssd),
+                        soft,
+                        Math.round(soft * (1 + hardPct / 100)),
+                        ''
+                    ]);
+                    for (let column = 1; column <= 5; column++) {
+                        row.getCell(column).font = { ...templateFont };
+                    }
+                }
+
+                // ヘッダーはテンプレートと同じ黄色背景・黒太字
+                for (let column = 1; column <= 5; column++) {
+                    const cell = worksheet.getCell(1, column);
+                    cell.font = { ...templateFont, bold: true };
+                    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFF00' } };
+                }
+
+                // テンプレートの入力上の注意事項をF列へ保持
+                CAP_SET_NOTES.forEach((note, index) => {
+                    const cell = worksheet.getCell(index + 1, 6);
+                    cell.value = note;
+                    cell.font = {
+                        ...templateFont,
+                        bold: true,
+                        color: { argb: index >= 4 ? 'FFFF0000' : 'FF000000' }
+                    };
+                });
+
+                // プルダウン候補はテンプレートと同じ非表示Sheet2へ保持
+                const listSheet = workbook.addWorksheet('Sheet2');
+                CAP_SET_CYCLE_OPTIONS.forEach((value, index) => {
+                    const cell = listSheet.getCell(index + 1, 1);
+                    cell.value = value;
+                    cell.font = { ...templateFont };
+                });
+                CAP_SET_REASON_OPTIONS.forEach((value, index) => {
+                    const cell = listSheet.getCell(index + 1, 2);
+                    cell.value = value;
+                    cell.font = { ...templateFont };
+                });
+                listSheet.state = 'hidden';
+
+                const allCycleFormula = `Sheet2!$A$1:$A$${CAP_SET_CYCLE_OPTIONS.length}`;
+                const tierCycleFormula = 'Sheet2!$A$1:$A$12';
+                const reasonFormula = `Sheet2!$B$1:$B$${CAP_SET_REASON_OPTIONS.length}`;
+                for (let rowNumber = 2; rowNumber <= 101; rowNumber++) {
+                    const cycleFormula = rowNumber <= 30
+                        ? allCycleFormula
+                        : rowNumber <= 99
+                            ? tierCycleFormula
+                            : '"SSD_1"';
+                    worksheet.getCell(rowNumber, 2).dataValidation = {
+                        type: 'list',
+                        allowBlank: true,
+                        formulae: [cycleFormula],
+                        showInputMessage: true,
+                        showErrorMessage: true
+                    };
+                    worksheet.getCell(rowNumber, 5).dataValidation = {
+                        type: 'list',
+                        allowBlank: true,
+                        formulae: [reasonFormula],
+                        showInputMessage: true,
+                        showErrorMessage: false
+                    };
+                }
+
+                worksheet.columns = [
+                    { width: 8.43 },
+                    { width: 8.43 },
+                    { width: 9.75 },
+                    { width: 10.83203125 },
+                    { width: 42 },
+                    { width: 8.43 }
+                ];
+                worksheet.getColumn(3).numFmt = '0';
+                worksheet.getColumn(4).numFmt = '0';
+
+                const buffer = await workbook.xlsx.writeBuffer();
+                const blob = new Blob(
+                    [buffer],
+                    { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }
+                );
+                const fileName = 'SSD_caps_' + getDateForFileName() + '.xlsx';
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = fileName;
+                link.style.display = 'none';
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+                showDownloadNotification(fileName);
+            } catch (error) {
+                console.error('[DSP Counter] Cap Set File作成エラー', error);
+                alert('Cap Set Fileの作成に失敗しました: ' + error.message);
             }
-
-            const wb = XLSX.utils.book_new();
-            const ws = XLSX.utils.aoa_to_sheet(wsData);
-            ws['!cols'] = [{ wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 12 }];
-            XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
-
-            const fileName = 'SSD_caps_' + getDateForFileName() + '.xlsx';
-            XLSX.writeFile(wb, fileName);
-            showDownloadNotification(fileName);
         };
 
         // isRunning: 取得中かどうか / source: 取得を開始したボタン ('week' | 'fill')
