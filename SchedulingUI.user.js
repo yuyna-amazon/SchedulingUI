@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      20.6
+// @version      21.1
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -22,7 +22,7 @@ function newFunction() {
         // === スクリプトバージョン（ヘッダーの @version と同期） ===
         const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version)
             ? GM_info.script.version
-            : '20.6';
+            : '21.1';
 
         // === 同一開始時刻あたりの必須上限（Yard capacity / 超過でハイライト） ===
         const YARD_CAPACITY_DEFAULT = 15;
@@ -2852,7 +2852,7 @@ function newFunction() {
             const showSetting = getSprCalcShowSetting();
 
             if (showSetting) {
-                html += sectionHeader('SPR設定',
+                html += sectionHeader('Act SPR',
                     '<button id="sprcalc-clear" style="padding:2px 6px;background:#fff;border:1px solid #ccc;border-radius:3px;font-size:9px;color:#666;cursor:pointer;white-space:nowrap;">クリア</button>',
                     true);
                 const actSprTotal = getActSprTotal();
@@ -2880,14 +2880,22 @@ function newFunction() {
             // ---- Volume / CVP Vol / Vol Gap ----
             const cvpVol = getCvpVol();
             const applyOn = getSprCalcApply();
+            const offCycleSpr = getSSDMultipliers();
+            const getVolumeSprRow = (cycleKey) => {
+                if (applyOn) return sprMap[cycleKey] || {};
+                const cycleSpr = Number(offCycleSpr[cycleKey]) || 0;
+                const row = {};
+                lengths.forEach(length => { row[length] = cycleSpr; });
+                return row;
+            };
             const gapCols = 'display:grid;width:' + gridWidth + 'px;grid-template-columns:' + NAME_W + 'px minmax(' + SUM_W + 'px,1fr) repeat(4,minmax(' + GAP_W + 'px,1fr)) minmax(' + ADJ_W + 'px,1fr);gap:1px;';
 
             html += sectionHeader('Volume / CVP Vol',
-                '<button id="sprcalc-apply-toggle" style="' + sprSmallBtnStyle(applyOn) + '">SPR反映 ' + (applyOn ? 'ON' : 'OFF') + '</button>',
+                '<button id="sprcalc-apply-toggle" style="' + sprSmallBtnStyle(applyOn) + '">Adjust SPR反映 ' + (applyOn ? 'ON' : 'OFF') + '</button>',
                 !showSetting);
             html += '<div style="' + gapCols + 'font-weight:bold;">' +
                 '<span></span>' +
-                '<span style="' + cellBase + 'background:#fff59d;color:#333;">SPR</span>' +
+                '<span style="' + cellBase + 'background:#fff59d;color:#333;">' + (applyOn ? 'Adjust SPR' : 'SPR') + '</span>' +
                 '<span style="' + cellBase + 'background:#fbe9e7;color:#555;">Volume</span>' +
                 '<span style="' + cellBase + 'background:#fbe9e7;color:#555;">CVP Vol</span>' +
                 '<span style="' + cellBase + 'background:#fbe9e7;color:#555;">Vol Gap</span>' +
@@ -2898,12 +2906,13 @@ function newFunction() {
             let volumeGrand = 0, cvpVolGrand = 0, adjVolumeGrand = 0;
 
             keys.forEach(k => {
-                const spr = Math.round(derivedSprOf(k) * 10) / 10;
-                const blocks = blockRowTotals[k] || 0;
-                const volume = Math.round(spr * blocks);
                 const cvp = cvpVol[k] || 0;
-                const gap = volume - cvp;
-                const adj = computeAdjGapRow(adjMatrix.map[k] || {}, sprMap[k] || {}, lengths, cvp);
+                const volumeSprRow = getVolumeSprRow(k);
+                const base = computeAdjGapRow(map[k] || {}, volumeSprRow, lengths, cvp);
+                const spr = base.spr;
+                const volume = base.volume;
+                const gap = base.gap;
+                const adj = computeAdjGapRow(adjMatrix.map[k] || {}, volumeSprRow, lengths, cvp);
                 volumeGrand += volume;
                 cvpVolGrand += cvp;
                 adjVolumeGrand += adj.volume;
@@ -3545,7 +3554,7 @@ function newFunction() {
                 '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;padding-bottom:4px;border-bottom:2px solid #e0f2f1;">' +
                 '<span style="font-weight:bold;color:#00897B;font-size:13px;">SPR算出</span>' +
                 '<div style="display:flex;align-items:center;gap:8px;">' +
-                '<button id="spr-calc-setting-btn" style="' + sprSmallBtnStyle(getSprCalcShowSetting()) + '">SPR設定</button>' +
+                '<button id="spr-calc-setting-btn" title="' + (getSprCalcShowSetting() ? 'クリックしてAct SPRを非表示にする' : 'クリックしてAct SPRを表示する') + '" style="' + sprSmallBtnStyle(getSprCalcShowSetting()) + '">' + (getSprCalcShowSetting() ? 'Act SPR 表示' : 'Act SPR 非表示') + '</button>' +
                 '<label style="font-size:10px;color:#555;cursor:pointer;white-space:nowrap;"><input type="radio" name="spr-calc-basis" value="required"' + (sprBasis === 'required' ? ' checked' : '') + ' style="vertical-align:middle;margin:0 2px 0 0;" />必須</label>' +
                 '<label style="font-size:10px;color:#555;cursor:pointer;white-space:nowrap;"><input type="radio" name="spr-calc-basis" value="accepted"' + (sprBasis === 'accepted' ? ' checked' : '') + ' style="vertical-align:middle;margin:0 2px 0 0;" />受諾</label>' +
                 '<button id="spr-calc-close" style="background:none;border:none;font-size:16px;color:#999;cursor:pointer;line-height:1;padding:0 2px;">×</button>' +
@@ -3580,6 +3589,8 @@ function newFunction() {
             sprCalcPanel.querySelector('#spr-calc-setting-btn')?.addEventListener('click', function () {
                 const next = !getSprCalcShowSetting();
                 saveSprCalcShowSetting(next);
+                this.textContent = next ? 'Act SPR 表示' : 'Act SPR 非表示';
+                this.title = next ? 'クリックしてAct SPRを非表示にする' : 'クリックしてAct SPRを表示する';
                 this.style.cssText = sprSmallBtnStyle(next);
                 renderSprCalcBody(sprCalcBody);
             });
@@ -3711,6 +3722,7 @@ function newFunction() {
                         this.value = mv[ssd].toFixed(1);
                         saveSSDMultipliers(mv);
                         refreshCycleValues();
+                        if (!getSprCalcApply()) renderSprCalcBody();
                     });
                 }
 
