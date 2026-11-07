@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      21.1
+// @version      21.4
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -22,7 +22,7 @@ function newFunction() {
         // === スクリプトバージョン（ヘッダーの @version と同期） ===
         const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version)
             ? GM_info.script.version
-            : '21.1';
+            : '21.4';
 
         // === 同一開始時刻あたりの必須上限（Yard capacity / 超過でハイライト） ===
         const YARD_CAPACITY_DEFAULT = 15;
@@ -212,9 +212,6 @@ function newFunction() {
         const FILL_DAYS_DEFAULT = 7;
         const FILL_DAYS_MIN = 1;
         const FILL_DAYS_MAX = 31;
-
-        // CVP出力のNode列で使用する既定拠点コード
-        const CVP_EXPORT_NODE = 'VFK1';
 
 
         // === ユーティリティ ===
@@ -1978,6 +1975,7 @@ function newFunction() {
             const selectedText = getSelectedDateText();
             const baseDate = resolveBaseDateFromSelectedTab(selectedText);
             const targetDate = formatYMD(baseDate);
+            const nodeCode = getStationCodeFromSelectorTitle();
 
             const exportRows = [];
             const suspect = []; // Cycle / Block Length が CVP 形式として不完全な行
@@ -1991,7 +1989,7 @@ function newFunction() {
                     ? '' : Number(td.blockLength);
                 exportRows.push([
                     targetDate,
-                    CVP_EXPORT_NODE,
+                    nodeCode,
                     formatExportServiceType(td.serviceType),
                     cycle,
                     timeParts.start,
@@ -2036,6 +2034,76 @@ function newFunction() {
             XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
 
             const fileName = 'SSD_cvp_adjust_' + formatFileYMD(baseDate) + '.csv';
+            XLSX.writeFile(wb, fileName, { bookType: 'csv' });
+            showDownloadNotification(fileName);
+        };
+
+        // Adjustの正の追加分だけをCVP形式で出力する
+        const downloadCvpAdditionalCsv = () => {
+            if (isFutureRequiredDownloading) return;
+            if (!currentSSDData || !currentTimeDataList.length) {
+                alert('データがありません');
+                return;
+            }
+
+            const adjust = getTimeReqAdjust();
+            const adjKeyMap = buildTimeAdjKeyMap();
+            const rows = sortTimeDataForPanel(currentTimeDataList);
+            const baseDate = resolveBaseDateFromSelectedTab(getSelectedDateText());
+            const targetDate = formatYMD(baseDate);
+            const nodeCode = getStationCodeFromSelectorTitle();
+            const exportRows = [];
+            const suspect = [];
+
+            rows.forEach(td => {
+                const delta = normalizeTimeAdjDelta(adjust[adjKeyMap.get(td)]);
+                if (delta <= 0) return;
+
+                const timeParts = getTimeParts(td.timeMinutes);
+                const cycle = (isEightSectorMode() || td.isDSP) ? (td.ssdGroup || '') : (td.cycle || '');
+                const len = (td.blockLength === '' || td.blockLength === undefined || td.blockLength === null)
+                    ? '' : Number(td.blockLength);
+                exportRows.push([
+                    targetDate,
+                    nodeCode,
+                    formatExportServiceType(td.serviceType),
+                    cycle,
+                    timeParts.start,
+                    timeParts.minute,
+                    len,
+                    delta
+                ]);
+
+                const validCycle = (isEightSectorMode() || td.isDSP)
+                    ? getActivePrimaryCycleKeys().includes(cycle)
+                    : /^CYCLE/i.test(cycle);
+                if (!validCycle || len === '') {
+                    suspect.push(minutesToHHMM(td.timeMinutes) + ' / Cycle ' + (cycle || '(空)') +
+                        ' / Length ' + (len === '' ? '(空)' : len));
+                }
+            });
+
+            if (exportRows.length === 0) {
+                alert('正の追加分がありません。\n右パネルのAdjustに1以上の値を入力してから押してください。');
+                return;
+            }
+            if (suspect.length) {
+                alert('次の行はCycleまたはBlock LengthがCVP形式として不完全です。\n出力後にExcelを確認してください。\n\n' + suspect.join('\n'));
+            }
+
+            const wsData = [
+                ['Target Date', 'Node', 'Service Type', 'Cycle', 'Start', 'Time', 'Block Length', 'Required Number of Drivers'],
+                ...exportRows
+            ];
+            const wb = XLSX.utils.book_new();
+            const ws = XLSX.utils.aoa_to_sheet(wsData);
+            ws['!cols'] = [
+                { wch: 14 }, { wch: 10 }, { wch: 28 }, { wch: 12 },
+                { wch: 8 }, { wch: 8 }, { wch: 14 }, { wch: 28 }
+            ];
+            XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+
+            const fileName = 'SSD_cvp_additional_' + formatFileYMD(baseDate) + '.csv';
             XLSX.writeFile(wb, fileName, { bookType: 'csv' });
             showDownloadNotification(fileName);
         };
@@ -3320,13 +3388,16 @@ function newFunction() {
                     ? '<button id="time-adj-clear" style="margin-left:8px;padding:1px 6px;background:#fff;border:1px solid #ccc;border-radius:3px;font-size:9px;font-weight:bold;color:#666;cursor:pointer;line-height:normal;vertical-align:middle;white-space:nowrap;">Adjustクリア</button>'
                     : '';
                 const csvBtnHtml = showAdjust
-                    ? '<button id="time-adj-csv" style="margin-left:8px;padding:1px 6px;background:#fff;border:1px solid #ccc;border-radius:3px;font-size:9px;font-weight:bold;color:#666;cursor:pointer;line-height:normal;vertical-align:middle;white-space:nowrap;">CSV</button>'
+                    ? '<button id="time-adj-csv" title="必須とAdjustの合計値をCSV出力" style="margin-left:8px;padding:1px 6px;background:#fff3e0;border:1px solid #ffb74d;border-radius:3px;font-size:9px;font-weight:bold;color:#ef6c00;cursor:pointer;line-height:normal;vertical-align:middle;white-space:nowrap;">必須+Adjust分CSV</button>'
+                    : '';
+                const additionalCsvBtnHtml = showAdjust
+                    ? '<button id="time-adj-add-csv" title="正のAdjust分だけをCSV出力" style="margin-left:4px;padding:1px 6px;background:#e3f2fd;border:1px solid #90caf9;border-radius:3px;font-size:9px;font-weight:bold;color:#1565c0;cursor:pointer;line-height:normal;vertical-align:middle;white-space:nowrap;">Adjust分CSV</button>'
                     : '';
                 const settingsBtnHtml = '<button id="dsp-settings-btn" style="margin-left:auto;margin-right:64px;padding:1px 6px;background:#f1f8e9;border:1px solid #a5d6a7;border-radius:4px;font-size:9px;font-weight:bold;cursor:pointer;color:#2e7d32;line-height:normal;vertical-align:middle;white-space:nowrap;">Cycle設定</button>';
 
                 // 見出し行とヘッダ行は sticky で固定（データ行だけがスクロールする）
                 return '<div style="position:sticky;top:0;z-index:1;background:#fff;padding-top:6px;padding-bottom:2px;">' +
-                    sectionTitle('<span style="white-space:nowrap;">開始時刻別</span>' + clearBtnHtml + csvBtnHtml + settingsBtnHtml, '#4CAF50') +
+                    sectionTitle('<span style="white-space:nowrap;">開始時刻別</span>' + clearBtnHtml + csvBtnHtml + additionalCsvBtnHtml + settingsBtnHtml, '#4CAF50') +
                     '<div style="display:grid;grid-template-columns:' + timeGridCols + ';gap:6px;padding:3px 8px;font-weight:bold;color:#666;font-size:10px;">' +
                     '<span>Cycle</span><span>開始時刻</span><span>サービスタイプ</span><span style="text-align:center;">Length</span><span style="text-align:center;">必須</span><span style="text-align:center;">受諾</span>' +
                     (showAdjust ? '<span style="text-align:center;">Adjust</span>' : '') +
@@ -3525,6 +3596,7 @@ function newFunction() {
                 });
 
                 rightPanel.querySelector('#time-adj-csv')?.addEventListener('click', downloadCvpAdjustCsv);
+                rightPanel.querySelector('#time-adj-add-csv')?.addEventListener('click', downloadCvpAdditionalCsv);
 
                 rightPanel.querySelector('#dsp-settings-btn')?.addEventListener('click', function (e) {
                     e.stopPropagation();
