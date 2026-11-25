@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      23.1
+// @version      23.2
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -723,8 +723,13 @@ function newFunction() {
             'Passenger Car Small',
             'DSP Initiated Work (Standard Vehicle)'
         ]);
+        const canonicalizeServiceTypeName = (value) => {
+            const raw = String(value || '').trim();
+            const spaced = raw.replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
+            return spaced.toLowerCase() === 'amflex kei car sml' ? 'AmFlex Kei Car Sml' : raw;
+        };
         const isServiceTypeName = (name) => {
-            const normalized = String(name || '').trim();
+            const normalized = canonicalizeServiceTypeName(name);
             return normalized.includes('AmFlex') || STANDARD_ROW_SERVICE_TYPES.has(normalized);
         };
 
@@ -927,8 +932,10 @@ function newFunction() {
 
         const getShortServiceType = (name) => {
             if (!name) return '-';
-            const parts = name.split('_');
-            return parts.length >= 2 ? parts.slice(1).join('_') : name;
+            const canonical = canonicalizeServiceTypeName(name);
+            if (canonical === 'AmFlex Kei Car Sml') return canonical;
+            const parts = canonical.split('_');
+            return parts.length >= 2 ? parts.slice(1).join('_') : canonical;
         };
 
         // AmFlex Kei Van / AmFlex Kei Car Sml の必須・受諾を集計
@@ -1275,7 +1282,7 @@ function newFunction() {
             const rows = [];
             for (let i = 1; i < json.length; i++) {
                 const source = json[i] || [];
-                const serviceType = String(source[columns.servicetype] || '').trim();
+                const serviceType = canonicalizeServiceTypeName(source[columns.servicetype]);
                 const timeMinutes = parseBsTimeMinutes(source[columns.starttime]);
                 const dateKey = parseBsDateKey(source[columns.ofddate]);
                 const blockLength = Number(source[columns.blocklength]);
@@ -1646,7 +1653,7 @@ function newFunction() {
             return `${y}${m}${d}`;
         };
 
-        const formatExportServiceType = (name) => (name || '-').replace(/_/g, ' ');
+        const formatExportServiceType = (name) => canonicalizeServiceTypeName((name || '-').replace(/_/g, ' '));
 
         const getTimeParts = (timeMinutes) => ({
             start: Math.floor(timeMinutes / 60),
@@ -2691,7 +2698,7 @@ function newFunction() {
                 if (delta === 0) return; // 行の除外条件はこれだけ（Adjust 後が 0 台の行も出力する）
                 const req = Math.max(0, (td.required || 0) + delta);
                 const timeParts = getTimeParts(td.timeMinutes);
-                const cycle = (isEightSectorMode() || td.isDSP) ? (td.ssdGroup || '') : (td.cycle || '');
+                const cycle = 'CYCLE_1';
                 const len = (td.blockLength === '' || td.blockLength === undefined || td.blockLength === null)
                     ? '' : Number(td.blockLength);
                 exportRows.push([
@@ -2704,9 +2711,7 @@ function newFunction() {
                     len,
                     req
                 ]);
-                const validCycle = (isEightSectorMode() || td.isDSP)
-                    ? getActivePrimaryCycleKeys().includes(cycle)
-                    : /^CYCLE/i.test(cycle);
+                const validCycle = cycle === 'CYCLE_1';
                 if (!validCycle || len === '') {
                     suspect.push(minutesToHHMM(td.timeMinutes) + ' / Cycle ' + (cycle || '(空)') +
                         ' / Length ' + (len === '' ? '(空)' : len));
@@ -2768,7 +2773,7 @@ function newFunction() {
                 if (delta <= 0) return;
 
                 const timeParts = getTimeParts(td.timeMinutes);
-                const cycle = (isEightSectorMode() || td.isDSP) ? (td.ssdGroup || '') : (td.cycle || '');
+                const cycle = 'CYCLE_1';
                 const len = (td.blockLength === '' || td.blockLength === undefined || td.blockLength === null)
                     ? '' : Number(td.blockLength);
                 exportRows.push([
@@ -2782,9 +2787,7 @@ function newFunction() {
                     delta
                 ]);
 
-                const validCycle = (isEightSectorMode() || td.isDSP)
-                    ? getActivePrimaryCycleKeys().includes(cycle)
-                    : /^CYCLE/i.test(cycle);
+                const validCycle = cycle === 'CYCLE_1';
                 if (!validCycle || len === '') {
                     suspect.push(minutesToHHMM(td.timeMinutes) + ' / Cycle ' + (cycle || '(空)') +
                         ' / Length ' + (len === '' ? '(空)' : len));
@@ -4088,7 +4091,7 @@ function newFunction() {
                     const adjRowKey = timeAdjKeyMap.get(td) || '';
                     const adjRowVal = timeAdjValues[adjRowKey] || 0;
                     const isMissingFromBs = hasBsSheetData && !td.isBsOnly && !currentBsBlockKeys.has(bsBlockKeyOf(td));
-                    const adjInputBg = isMissingFromBs ? '#ffebee' : '#fff';
+                    const adjInputBg = isMissingFromBs ? '#ffebee' : (adjRowVal !== 0 ? '#fffde7' : '#fff');
                     const adjInputBorder = isMissingFromBs ? '#ef9a9a' : '#90CAF9';
                     timeRowsHtml +=
                         '<div style="display:grid;grid-template-columns:' + timeGridCols + ';gap:6px;margin:3px 0;padding:6px 8px;' + rowStyle + 'border-radius:3px;align-items:center;">' +
@@ -4099,7 +4102,7 @@ function newFunction() {
                         '<span style="color:#FF9800;font-weight:bold;text-align:center;">' + td.required + '</span>' +
                         '<span style="color:#4CAF50;font-weight:bold;text-align:center;">' + td.accepted + '</span>' +
                         (showAdjust
-                            ? '<input type="number" class="dsp-time-adj" data-key="' + escapeHtml(adjRowKey) + '"' +
+                            ? '<input type="number" class="dsp-time-adj" data-key="' + escapeHtml(adjRowKey) + '" data-missing-bs="' + (isMissingFromBs ? '1' : '0') + '"' +
                             ' value="' + (adjRowVal ? adjRowVal : '') + '" step="1" min="-999" max="999" placeholder="±0"' +
                             ' style="width:100%;padding:2px;border:1px solid ' + adjInputBorder + ';background:' + adjInputBg + ';border-radius:3px;text-align:center;font-size:10px;box-sizing:border-box;color:#2196F3;font-weight:bold;" />'
                             : '') +
@@ -4298,6 +4301,15 @@ function newFunction() {
             // 開始時刻別の必須 adjust
             const bindTimePanelEvents = function () {
                 rightPanel.querySelectorAll('.dsp-time-adj').forEach(function (el) {
+                    el.addEventListener('input', function () {
+                        if (this.getAttribute('data-missing-bs') === '1') {
+                            this.style.background = '#ffebee';
+                            return;
+                        }
+                        const raw = String(this.value).trim();
+                        const value = raw === '' ? 0 : Number(raw);
+                        this.style.background = Number.isFinite(value) && value !== 0 ? '#fffde7' : '#fff';
+                    });
                     el.addEventListener('change', function () {
                         const key = this.getAttribute('data-key');
                         if (!key) return;
