@@ -1,19 +1,518 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      21.4
+// @version      23.1
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
 // @match        https://logistics.amazon.co.jp/internal/scheduling/dsps*
+// @match        https://bogyov2.harmony.a2z.com/*
 // @updateURL    https://raw.githubusercontent.com/yuyna-amazon/SchedulingUI/main/SchedulingUI.user.js
 // @downloadURL  https://raw.githubusercontent.com/yuyna-amazon/SchedulingUI/main/SchedulingUI.user.js
-// @grant        none
+// @grant        GM_info
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_deleteValue
+// @grant        GM_addStyle
 // @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
 // @require      https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js
 // ==/UserScript==
 
-newFunction();
+if (window.location.hostname === 'bogyov2.harmony.a2z.com') {
+    initBogyoCapSetAutomation();
+} else {
+    newFunction();
+}
+
+async function initBogyoCapSetAutomation() {
+    'use strict';
+
+    const requestStorageKey = 'schedulingui-bogyo-capset-request';
+    const params = new URLSearchParams(window.location.search);
+    let savedRequest = null;
+    try {
+        const savedValue = GM_getValue(requestStorageKey, '');
+        savedRequest = savedValue ? JSON.parse(savedValue) : null;
+    } catch (error) {
+        console.warn('[SchedulingUI] BOGYO連携データを読み取れませんでした', error);
+    }
+
+    const savedRequestIsFresh = savedRequest
+        && Number.isFinite(savedRequest.requestedAt)
+        && Date.now() - savedRequest.requestedAt < 5 * 60 * 1000;
+    const requestedByUrl = params.get('suiAuto') === '1';
+    const targetDate = params.get('suiDate') || (savedRequestIsFresh ? savedRequest.date : '');
+    const targetNode = (params.get('suiNode') || (savedRequestIsFresh ? savedRequest.node : '') || '').trim().toUpperCase();
+    const targetCaps = savedRequestIsFresh && savedRequest.caps && typeof savedRequest.caps === 'object'
+        ? savedRequest.caps
+        : {};
+    if ((!requestedByUrl && !savedRequestIsFresh) || !targetDate || !targetNode) return;
+
+    console.info('[SchedulingUI] BOGYO CapSet自動選択を開始します:', targetDate, targetNode);
+
+    // 自動入力用パラメータは取得後にURLから除去する。
+    const cleanUrl = new URL(window.location.href);
+    cleanUrl.searchParams.delete('suiAuto');
+    cleanUrl.searchParams.delete('suiDate');
+    cleanUrl.searchParams.delete('suiNode');
+    window.history.replaceState(null, '', cleanUrl.pathname + cleanUrl.search + cleanUrl.hash);
+
+    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+    const normalizeText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const isVisible = (element) => !!(element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
+    const waitFor = async (getter, timeoutMs = 30000, intervalMs = 150) => {
+        const startedAt = Date.now();
+        let hiddenStartedAt = document.hidden ? Date.now() : null;
+        let hiddenDuration = 0;
+        const handleVisibilityChange = () => {
+            if (document.hidden) {
+                if (hiddenStartedAt === null) hiddenStartedAt = Date.now();
+            } else if (hiddenStartedAt !== null) {
+                hiddenDuration += Date.now() - hiddenStartedAt;
+                hiddenStartedAt = null;
+            }
+        };
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+        try {
+            while (true) {
+                const currentHiddenDuration = hiddenStartedAt === null ? 0 : Date.now() - hiddenStartedAt;
+                const activeElapsed = Date.now() - startedAt - hiddenDuration - currentHiddenDuration;
+                if (activeElapsed >= timeoutMs) return null;
+                if (!document.hidden) {
+                    const result = getter();
+                    if (result) return result;
+                }
+                await sleep(intervalMs);
+            }
+        } finally {
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
+        }
+    };
+
+    const findTextControl = (text) => {
+        const candidates = Array.from(document.querySelectorAll('button, a, [role="tab"], span'));
+        const label = candidates.find(element => isVisible(element) && normalizeText(element.textContent) === text);
+        return label ? (label.closest('button, a, [role="tab"]') || label) : null;
+    };
+
+    const findVisibleButtonByText = (pattern) => Array.from(document.querySelectorAll('button'))
+        .find(button => isVisible(button) && pattern.test(normalizeText(button.textContent)));
+
+    const findInteractableButtonByText = (pattern) => {
+        const button = findVisibleButtonByText(pattern);
+        if (!button || !button.isConnected || button.disabled) return null;
+        const rect = button.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return null;
+        const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        return hit && (button === hit || button.contains(hit) || hit.closest('button') === button) ? button : null;
+    };
+
+    const clickLikeUser = (element) => {
+        element.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        element.focus({ preventScroll: true });
+        const base = { bubbles: true, cancelable: true, composed: true, button: 0 };
+        if (typeof PointerEvent === 'function') {
+            element.dispatchEvent(new PointerEvent('pointerdown', { ...base, pointerId: 1, pointerType: 'mouse', isPrimary: true, buttons: 1 }));
+        }
+        element.dispatchEvent(new MouseEvent('mousedown', { ...base, buttons: 1 }));
+        if (typeof PointerEvent === 'function') {
+            element.dispatchEvent(new PointerEvent('pointerup', { ...base, pointerId: 1, pointerType: 'mouse', isPrimary: true, buttons: 0 }));
+        }
+        element.dispatchEvent(new MouseEvent('mouseup', { ...base, buttons: 0 }));
+        element.dispatchEvent(new MouseEvent('click', { ...base, buttons: 0 }));
+    };
+
+    const getBogyoTableInfo = () => {
+        const tables = Array.from(document.querySelectorAll('table'));
+        for (const table of tables) {
+            if (!isVisible(table)) continue;
+            const rows = Array.from(table.querySelectorAll('tbody tr'));
+            if (!rows.length) continue;
+            const headers = Array.from(table.querySelectorAll('thead th')).map(th => normalizeText(th.textContent));
+            const dateIndex = headers.findIndex(text => text === 'OFD Date');
+            const stationIndex = headers.findIndex(text => text === 'Station');
+            const cycleIndex = headers.findIndex(text => text === 'Cycle Name');
+            const otrIndex = headers.findIndex(text => text === 'OTR');
+            const cvpIndex = headers.findIndex(text => text === 'CvP');
+            const sourceSoftIndex = headers.findIndex(text => text === 'Soft Cap');
+            const sourceHardIndex = headers.findIndex(text => text === 'Hard Cap');
+            const softIndex = headers.findIndex(text => text === 'DS Soft Cap');
+            const hardIndex = headers.findIndex(text => text === 'DS Hard Cap');
+            if ([dateIndex, stationIndex, cycleIndex, otrIndex, cvpIndex, sourceSoftIndex, sourceHardIndex, softIndex, hardIndex].every(index => index >= 0)) {
+                return { table, rows, dateIndex, stationIndex, cycleIndex, otrIndex, cvpIndex, sourceSoftIndex, sourceHardIndex, softIndex, hardIndex };
+            }
+        }
+        return null;
+    };
+
+    const findBogyoCycleRow = (cycleName) => {
+        const info = getBogyoTableInfo();
+        if (!info) return null;
+        const expectedCycle = normalizeText(cycleName).toUpperCase();
+        const expectedDate = normalizeText(targetDate);
+        const expectedStation = normalizeText(targetNode).toUpperCase();
+        const row = info.rows.find(candidate => {
+            const cells = candidate.querySelectorAll('td');
+            return cells[info.dateIndex] && normalizeText(cells[info.dateIndex].textContent) === expectedDate &&
+                cells[info.stationIndex] && normalizeText(cells[info.stationIndex].textContent).toUpperCase() === expectedStation &&
+                cells[info.cycleIndex] && normalizeText(cells[info.cycleIndex].textContent).toUpperCase() === expectedCycle;
+        });
+        return row ? { ...info, row } : null;
+    };
+
+    const areBogyoSourceCapsLoaded = (cycleNames) => cycleNames.every(cycleName => {
+        const info = findBogyoCycleRow(cycleName);
+        if (!info) return false;
+        const cells = info.row.querySelectorAll('td');
+        return [info.otrIndex, info.cvpIndex, info.sourceSoftIndex, info.sourceHardIndex].every(index => {
+            const text = normalizeText(cells[index]?.textContent);
+            return text !== '' && text !== '-';
+        });
+    });
+
+    const setControlledInputValue = (input, value) => {
+        const nextValue = String(value);
+        input.focus();
+        input.select();
+
+        let insertedAsUserInput = false;
+        try {
+            insertedAsUserInput = document.execCommand('insertText', false, nextValue) && input.value === nextValue;
+        } catch (error) { }
+
+        if (!insertedAsUserInput) {
+            const previousValue = input.value;
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+            if (setter) setter.call(input, nextValue);
+            else input.value = nextValue;
+            if (input._valueTracker) input._valueTracker.setValue(previousValue);
+            input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+        }
+
+        input.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+        input.blur();
+    };
+
+    const findSelectedToken = (value) => Array.from(document.querySelectorAll('[role="group"][aria-label]'))
+        .find(token => normalizeText(token.getAttribute('aria-label')).toUpperCase() === String(value).toUpperCase());
+
+    const findVisibleDropdownChoices = (trigger) => {
+        const triggerRect = trigger.getBoundingClientRect();
+        const listboxes = Array.from(document.querySelectorAll('[role="listbox"]'))
+            .filter(listbox => isVisible(listbox))
+            .filter(listbox => {
+                const rect = listbox.getBoundingClientRect();
+                const verticallyNear = rect.bottom >= triggerRect.top - 4 && rect.top - triggerRect.bottom < 700;
+                const horizontallyAligned = rect.right > triggerRect.left && rect.left < triggerRect.right;
+                return verticallyNear && horizontallyAligned;
+            })
+            .sort((a, b) => Math.abs(a.getBoundingClientRect().top - triggerRect.bottom) -
+                Math.abs(b.getBoundingClientRect().top - triggerRect.bottom));
+        const listbox = listboxes[0];
+        if (!listbox) return [];
+
+        let choices = Array.from(listbox.querySelectorAll('[role="option"]'));
+        if (!choices.length) choices = Array.from(listbox.querySelectorAll('li'));
+        return choices.filter(element => normalizeText(element.getAttribute('aria-label') || element.textContent));
+    };
+
+    const findVisibleDropdownChoice = (trigger, value) => {
+        const expected = normalizeText(value).toUpperCase();
+        return findVisibleDropdownChoices(trigger)
+            .find(element => normalizeText(element.getAttribute('aria-label') || element.textContent).toUpperCase() === expected) || null;
+    };
+
+    const normalizeBogyoReasonText = (value) => {
+        const text = normalizeText(value);
+        const upper = text.toUpperCase();
+        if (upper.includes('INCREASE - OTR CAPACITY ADJUSTMENT')) return 'Increase - OTR Capacity Adjustment';
+        if (upper.includes('DECREASE - OTR CAPACITY')) return 'Decrease - OTR capacity';
+        if (/\bOTHER\b/i.test(text)) return 'Other';
+        return text;
+    };
+
+    const findBogyoReasonChoice = (trigger) => findVisibleDropdownChoices(trigger)[0] || null;
+
+    const completedCycles = [];
+    const skippedCycles = [];
+    const originalPageTitle = document.title;
+    const setBogyoStatus = (text) => {
+        document.title = text ? text + ' | ' + originalPageTitle : originalPageTitle;
+    };
+
+    try {
+        if (window.location.pathname !== '/ssd-updates') {
+            const ssdUpdatesLink = await waitFor(() => document.querySelector('a[href="/ssd-updates"]'));
+            if (!ssdUpdatesLink) throw new Error('SSD Updatesリンクが見つかりません');
+            ssdUpdatesLink.click();
+            const moved = await waitFor(() => window.location.pathname === '/ssd-updates');
+            if (!moved) throw new Error('SSD Updates画面を開けませんでした');
+        }
+
+        setBogyoStatus('準備中…');
+        await sleep(500);
+
+        const visibleInputs = await waitFor(() => {
+            const dateButton = findVisibleButtonByText(/^select\s+ofd\s+dates?$/i);
+            const nodeButton = findVisibleButtonByText(/^select\s+nodes?$/i);
+            return dateButton && nodeButton ? { dateButton, nodeButton } : null;
+        }, 30000);
+        if (!visibleInputs) throw new Error('OFD DateとNodeの入力欄が表示されませんでした');
+        console.info('[SchedulingUI] OFD DateとNodeの入力欄の表示を確認しました');
+        await sleep(1500);
+
+        const dateButton = await waitFor(() => findInteractableButtonByText(/^select\s+ofd\s+dates?$/i), 10000);
+        if (!dateButton) throw new Error('OFD Dateボタンがクリック可能な状態になりませんでした');
+
+        if (!findSelectedToken(targetDate)) {
+            console.info('[SchedulingUI] OFD Dateボタンをクリックします');
+            clickLikeUser(dateButton);
+            const dateDropdownOpen = await waitFor(() => dateButton.getAttribute('aria-expanded') === 'true', 5000);
+            if (!dateDropdownOpen) throw new Error('OFD Dateのドロップダウンが開きませんでした');
+            console.info('[SchedulingUI] OFD Dateドロップダウンの表示を確認しました');
+
+            const dateOptionVisible = await waitFor(() => findVisibleDropdownChoice(dateButton, targetDate), 2000);
+            if (!dateOptionVisible) throw new Error('OFD Dateのドロップダウンに日付（' + targetDate + '）が表示されませんでした');
+            console.info('[SchedulingUI] OFD Date候補の表示を確認しました:', targetDate);
+            await sleep(300);
+
+            const dateOption = findVisibleDropdownChoice(dateButton, targetDate);
+            if (!dateOption) throw new Error('表示された日付（' + targetDate + '）を取得できませんでした');
+            clickLikeUser(dateOption);
+            console.info('[SchedulingUI] OFD Date候補をクリックしました:', targetDate);
+            const dateSelected = await waitFor(() => findSelectedToken(targetDate), 8000);
+            if (!dateSelected) throw new Error('日付（' + targetDate + '）を選択できませんでした');
+            await sleep(300);
+        }
+
+        const nodeButton = await waitFor(() => findInteractableButtonByText(/^select\s+nodes?$/i), 10000);
+        if (!nodeButton) throw new Error('Nodeボタンがクリック可能な状態になりませんでした');
+
+        if (!findSelectedToken(targetNode)) {
+            console.info('[SchedulingUI] Nodeボタンをクリックします');
+            clickLikeUser(nodeButton);
+            const nodeDropdownOpen = await waitFor(() => nodeButton.getAttribute('aria-expanded') === 'true', 5000);
+            if (!nodeDropdownOpen) throw new Error('Nodeのドロップダウンが開きませんでした');
+            console.info('[SchedulingUI] Nodeドロップダウンの表示を確認しました');
+
+            const nodeOptionVisible = await waitFor(() => findVisibleDropdownChoice(nodeButton, targetNode), 10000);
+            if (!nodeOptionVisible) throw new Error('NodeのドロップダウンにNode（' + targetNode + '）が表示されませんでした');
+            console.info('[SchedulingUI] Node候補の表示を確認しました:', targetNode);
+            await sleep(300);
+
+            const nodeOption = findVisibleDropdownChoice(nodeButton, targetNode);
+            if (!nodeOption) throw new Error('表示されたNode（' + targetNode + '）を取得できませんでした');
+            clickLikeUser(nodeOption);
+            console.info('[SchedulingUI] Node候補をクリックしました:', targetNode);
+            const nodeSelected = await waitFor(() => findSelectedToken(targetNode), 8000);
+            if (!nodeSelected) throw new Error('Node（' + targetNode + '）を選択できませんでした');
+        }
+
+        await sleep(300);
+        const closeNodeButton = await waitFor(() => findInteractableButtonByText(/^select\s+nodes?$/i), 5000);
+        if (!closeNodeButton) throw new Error('Nodeドロップダウンを閉じるボタンが見つかりませんでした');
+
+        if (closeNodeButton.getAttribute('aria-expanded') === 'true') {
+            console.info('[SchedulingUI] Nodeボタンを再クリックしてドロップダウンを閉じます');
+            clickLikeUser(closeNodeButton);
+            const dropdownClosed = await waitFor(() => {
+                const currentButton = findVisibleButtonByText(/^select\s+nodes?$/i);
+                return currentButton && currentButton.getAttribute('aria-expanded') !== 'true';
+            }, 5000);
+            if (!dropdownClosed) throw new Error('Nodeのドロップダウンを閉じられませんでした');
+            console.info('[SchedulingUI] Nodeドロップダウンを閉じました');
+        }
+
+        const capUpliftTab = await waitFor(() => findTextControl('Cap Uplift'), 10000);
+        if (!capUpliftTab) throw new Error('Cap Upliftタブが見つかりません');
+        console.info('[SchedulingUI] 日付とNodeの選択後にCap Upliftタブを開きます');
+        clickLikeUser(capUpliftTab);
+        setBogyoStatus('Cap Uplift表示待ち…');
+        const capUpliftTableVisible = await waitFor(() => getBogyoTableInfo(), 30000);
+        if (!capUpliftTableVisible) throw new Error('Cap Upliftの表が表示されませんでした');
+        console.info('[SchedulingUI] Cap Upliftの表表示を確認しました');
+
+        const capCycleOrder = ['SSD_1', 'SSD_1_B', 'SSD_2', 'SSD_3', 'SSD_3_B', 'SSD_4'];
+        const targetCycles = capCycleOrder.filter(cycle => {
+            const cap = targetCaps[cycle];
+            return cap && Number.isFinite(Number(cap.soft)) && Number.isFinite(Number(cap.hard));
+        });
+        if (targetCycles.length !== capCycleOrder.length) {
+            const missing = capCycleOrder.filter(cycle => !targetCycles.includes(cycle));
+            throw new Error('SUIのSoft/Hard値が不足しています: ' + missing.join(', '));
+        }
+
+        setBogyoStatus('BOGYOデータ読込待ち…');
+        const sourceCapsLoaded = await waitFor(() => areBogyoSourceCapsLoaded(targetCycles), 60000);
+        if (!sourceCapsLoaded) throw new Error('BOGYOのOTR・CvP・Soft Cap・Hard Capが読み込まれませんでした');
+
+        const completedReasons = {};
+        for (let cycleIndex = 0; cycleIndex < targetCycles.length; cycleIndex++) {
+            const targetCycle = targetCycles[cycleIndex];
+            const targetCap = targetCaps[targetCycle];
+            const softValue = Math.round(Number(targetCap.soft));
+            const hardValue = Math.round(Number(targetCap.hard));
+            setBogyoStatus(targetCycle + ' 入力中…');
+
+            const cycleRowInfo = await waitFor(() => findBogyoCycleRow(targetCycle), 30000);
+            if (!cycleRowInfo) throw new Error('Cycle Name「' + targetCycle + '」の行が見つかりません');
+            const initialCells = cycleRowInfo.row.querySelectorAll('td');
+            const currentDsSoft = Number(normalizeText(initialCells[cycleRowInfo.softIndex]?.textContent).replace(/,/g, ''));
+            const currentDsHard = Number(normalizeText(initialCells[cycleRowInfo.hardIndex]?.textContent).replace(/,/g, ''));
+            if (currentDsSoft === softValue && currentDsHard === hardValue) {
+                completedCycles.push(targetCycle);
+                completedReasons[targetCycle] = '変更なし';
+                console.info('[SchedulingUI] BOGYO CapSet変更不要:', targetCycle, { soft: softValue, hard: hardValue });
+                continue;
+            }
+
+            const softCell = initialCells[cycleRowInfo.softIndex];
+            const editButton = softCell && softCell.querySelector('button[aria-label^="Edit DS Soft Cap"]');
+            if (!editButton) throw new Error(targetCycle + ' のDS Soft Cap編集ボタンが見つかりません');
+            clickLikeUser(editButton);
+
+            const editInputs = await waitFor(() => {
+                const current = findBogyoCycleRow(targetCycle);
+                if (!current) return null;
+                const softInput = current.row.querySelector('input[aria-label="DS Soft Cap"]');
+                const hardInput = current.row.querySelector('input[aria-label="DS Hard Cap"]');
+                return softInput && hardInput ? { softInput, hardInput } : null;
+            }, 10000);
+            if (!editInputs) throw new Error(targetCycle + ' のSoft/Hard入力欄が表示されませんでした');
+
+            const initialInputSoft = Number(String(editInputs.softInput.value || '').replace(/,/g, ''));
+            const initialInputHard = Number(String(editInputs.hardInput.value || '').replace(/,/g, ''));
+            if (initialInputSoft === softValue && initialInputHard === hardValue) {
+                const current = findBogyoCycleRow(targetCycle);
+                const cancelButton = current && current.row.querySelector('button[aria-label="Cancel changes"]');
+                if (!cancelButton) throw new Error(targetCycle + ' は変更不要ですがキャンセルボタンが見つかりません');
+                clickLikeUser(cancelButton);
+                const editClosed = await waitFor(() => {
+                    const latest = findBogyoCycleRow(targetCycle);
+                    return latest && !latest.row.querySelector('input[aria-label="DS Soft Cap"]');
+                }, 5000);
+                if (!editClosed) throw new Error(targetCycle + ' の変更不要行を閉じられませんでした');
+                completedCycles.push(targetCycle);
+                completedReasons[targetCycle] = '変更なし';
+                console.info('[SchedulingUI] BOGYO CapSet変更不要（編集値確認）:', targetCycle, { soft: softValue, hard: hardValue });
+                continue;
+            }
+
+            setControlledInputValue(editInputs.softInput, softValue);
+            const currentInputs = await waitFor(() => {
+                const current = findBogyoCycleRow(targetCycle);
+                if (!current) return null;
+                const softInput = current.row.querySelector('input[aria-label="DS Soft Cap"]');
+                const hardInput = current.row.querySelector('input[aria-label="DS Hard Cap"]');
+                return softInput && hardInput ? { softInput, hardInput } : null;
+            }, 3000);
+            if (!currentInputs) throw new Error(targetCycle + ' の入力欄を再取得できませんでした');
+            setControlledInputValue(currentInputs.hardInput, hardValue);
+
+            const reasonButton = await waitFor(() => {
+                const current = findBogyoCycleRow(targetCycle);
+                if (!current) return null;
+                return Array.from(current.row.querySelectorAll('button[aria-haspopup="listbox"]'))
+                    .find(button => !button.disabled) || null;
+            }, 10000);
+            if (!reasonButton) {
+                const current = findBogyoCycleRow(targetCycle);
+                const rowText = normalizeText(current?.row.textContent);
+                if (/opposite directions/i.test(rowText)) {
+                    const cancelButton = current && current.row.querySelector('button[aria-label="Cancel changes"]');
+                    if (!cancelButton) throw new Error(targetCycle + ' は方向不一致ですがキャンセルボタンが見つかりません');
+                    clickLikeUser(cancelButton);
+                    const editClosed = await waitFor(() => {
+                        const latest = findBogyoCycleRow(targetCycle);
+                        return latest && !latest.row.querySelector('input[aria-label="DS Soft Cap"]');
+                    }, 5000);
+                    if (!editClosed) throw new Error(targetCycle + ' の方向不一致行を閉じられませんでした');
+                    skippedCycles.push(targetCycle);
+                    completedReasons[targetCycle] = 'スキップ（Soft/Hard方向不一致）';
+                    console.warn('[SchedulingUI] BOGYO CapSetスキップ（Soft/Hard方向不一致）:', targetCycle, {
+                        soft: softValue,
+                        hard: hardValue
+                    });
+                    continue;
+                }
+                const softInput = current && current.row.querySelector('input[aria-label="DS Soft Cap"]');
+                const hardInput = current && current.row.querySelector('input[aria-label="DS Hard Cap"]');
+                throw new Error(targetCycle + ' のReason選択欄が有効になりませんでした' +
+                    '（入力値 Soft=' + (softInput ? softInput.value : '取得不可') +
+                    ', Hard=' + (hardInput ? hardInput.value : '取得不可') + '）');
+            }
+            clickLikeUser(reasonButton);
+
+            const reasonDropdownOpen = await waitFor(() => reasonButton.getAttribute('aria-expanded') === 'true', 5000);
+            if (!reasonDropdownOpen) throw new Error(targetCycle + ' のReasonドロップダウンを開けませんでした');
+            const reasonOption = await waitFor(() => findBogyoReasonChoice(reasonButton), 5000);
+            if (!reasonOption) throw new Error(targetCycle + ' のReason先頭候補が見つかりませんでした');
+            const selectedReason = normalizeBogyoReasonText(reasonOption.getAttribute('aria-label') || reasonOption.textContent);
+            if (/\bOTHER\b/i.test(selectedReason)) {
+                throw new Error(targetCycle + ' でOther Reasonが候補になったため停止しました');
+            }
+            clickLikeUser(reasonOption);
+
+            const reasonSelected = await waitFor(() => {
+                const current = findBogyoCycleRow(targetCycle);
+                if (!current) return false;
+                return Array.from(current.row.querySelectorAll('button[aria-haspopup="listbox"]'))
+                    .some(button => normalizeBogyoReasonText(button.textContent) === selectedReason);
+            }, 5000);
+            if (!reasonSelected) throw new Error(targetCycle + ' のReason「' + selectedReason + '」を選択できませんでした');
+            const selectedReasonButton = Array.from(findBogyoCycleRow(targetCycle)?.row.querySelectorAll('button[aria-haspopup="listbox"]') || [])
+                .find(button => normalizeText(button.textContent) !== 'Select Reason');
+            const confirmedReason = normalizeBogyoReasonText(selectedReasonButton?.textContent);
+            if (!confirmedReason || /\bOTHER\b/i.test(confirmedReason) || confirmedReason !== selectedReason) {
+                throw new Error(targetCycle + ' のReason確認に失敗しました（選択値: ' + (confirmedReason || '取得不可') + '）');
+            }
+
+            const saveButton = await waitFor(() => {
+                const current = findBogyoCycleRow(targetCycle);
+                if (!current) return null;
+                const button = current.row.querySelector('button[aria-label="Save changes"]');
+                return button && !button.disabled ? button : null;
+            }, 5000);
+            if (!saveButton) throw new Error(targetCycle + ' の保存ボタンが有効になりませんでした');
+            clickLikeUser(saveButton);
+
+            const saved = await waitFor(() => {
+                const current = findBogyoCycleRow(targetCycle);
+                if (!current || current.row.querySelector('input[aria-label="DS Soft Cap"]')) return false;
+                const cells = current.row.querySelectorAll('td');
+                const savedSoft = Number(normalizeText(cells[current.softIndex]?.textContent).replace(/,/g, ''));
+                const savedHard = Number(normalizeText(cells[current.hardIndex]?.textContent).replace(/,/g, ''));
+                return savedSoft === softValue && savedHard === hardValue;
+            }, 30000);
+            if (!saved) throw new Error(targetCycle + ' の保存結果を確認できませんでした');
+
+            completedCycles.push(targetCycle);
+            completedReasons[targetCycle] = selectedReason;
+            console.info('[SchedulingUI] BOGYO CapSet保存完了:', targetCycle, { soft: softValue, hard: hardValue, reason: selectedReason });
+            await sleep(500);
+        }
+
+        setBogyoStatus(skippedCycles.length ? 'CapSet完了（一部スキップ）' : 'CapSet完了');
+        const reasonSummary = targetCycles.map(cycle => cycle + ': ' + (completedReasons[cycle] || '未処理')).join('\n');
+        alert('BOGYO CapSetが完了しました。\n' + reasonSummary);
+        console.info('[SchedulingUI] BOGYO CapSet完了:', targetDate, targetNode, {
+            completed: completedCycles,
+            skipped: skippedCycles
+        });
+    } catch (error) {
+        console.error('[SchedulingUI] BOGYO CapSet自動入力エラー', error);
+        const completedMessage = completedCycles.length
+            ? '\n完了済み: ' + completedCycles.join(', ')
+            : '\n完了済み: なし';
+        const skippedMessage = skippedCycles.length
+            ? '\nスキップ済み: ' + skippedCycles.join(', ')
+            : '';
+        alert('BOGYO CapSetの自動入力に失敗しました。' + completedMessage + skippedMessage + '\n' + error.message);
+    } finally {
+        setBogyoStatus('');
+        try { GM_deleteValue(requestStorageKey); } catch (error) { }
+    }
+}
 
 function newFunction() {
     (function () {
@@ -22,7 +521,7 @@ function newFunction() {
         // === スクリプトバージョン（ヘッダーの @version と同期） ===
         const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version)
             ? GM_info.script.version
-            : '21.4';
+            : '23.1';
 
         // === 同一開始時刻あたりの必須上限（Yard capacity / 超過でハイライト） ===
         const YARD_CAPACITY_DEFAULT = 15;
@@ -33,6 +532,7 @@ function newFunction() {
         let currentSSDData = null;
         let currentTimeDataList = [];
         let currentBlockDataList = [];
+        let currentBsAdjustDataList = [];
         let currentTotals = { accepted: 0, required: 0, proDPAccepted: 0, proDPRequired: 0 };
         let isCalculating = false;
         let debounceTimer = null;
@@ -85,6 +585,8 @@ function newFunction() {
         const C1C3_OVERRIDE_DEFAULTS = { 'SSD_C1': 0, 'SSD_C3': 0, 'SSD_C1_1': 0, 'SSD_C1_1B': 0, 'SSD_C3_3B': 0, 'SSD_C3_4': 0, 'CVP_BUF_1': 0, 'CVP_BUF_1B': 0, 'CVP_BUF_3B': 0, 'CVP_BUF_4': 0 };
         const CVP_FIXED_OVERRIDE_KEYS = ['SSD_C1_1', 'SSD_C1_1B', 'SSD_C3_3B', 'SSD_C3_4'];
         const CVP_BUFFER_OVERRIDE_KEYS = ['CVP_BUF_1', 'CVP_BUF_1B', 'CVP_BUF_3B', 'CVP_BUF_4'];
+        const CVP_CYCLE_KEYS = ['SSD_1', 'SSD_1_B', 'SSD_3_B', 'SSD_4'];
+        const CVP_CYCLE_ENABLED_DEFAULTS = { 'SSD_1': true, 'SSD_1_B': true, 'SSD_3_B': true, 'SSD_4': true };
 
         // === SSD時間帯（分, min <= 開始時刻 < max）===
         // 設定パネル（⚙）から変更可能。max: null = 上限なし（Infinity）
@@ -175,6 +677,7 @@ function newFunction() {
         const SPR_TEMPLATE_8_URL = 'https://drive.corp.amazon.com/documents/yuyna@/Daily%20SPR%E8%A8%AD%E5%AE%9A_8Sector.xlsx';
 
         // === Cap Set Fileテンプレート ===
+        const BOGYO_CAP_SET_URL = 'https://bogyov2.harmony.a2z.com/ssd-updates';
         const CAP_SET_TEMPLATE_URL = 'https://amazon.awsapps.com/workdocs-amazon/index.html#/document/c26cf02264749b290c47c8f444d377c428eb7d762d5bb220483d70dd03cab162';
         const CAP_SET_REASON_OPTIONS = Object.freeze([
             'Increase - OTR Capacity Adjustment',
@@ -483,7 +986,14 @@ function newFunction() {
 
         const calculateCycleSoft = (sk, baseValue, buffer, multiplier, pct, overrides, subtract, softAdjust, ssdData, allMultipliers) => {
             const cvpFixedMode = CVP_FIXED_OVERRIDE_KEYS.every(k => overrides && overrides[k] !== undefined);
+            const cvpCycleEnabled = overrides && overrides.__cvpCycleEnabled
+                ? overrides.__cvpCycleEnabled
+                : CVP_CYCLE_ENABLED_DEFAULTS;
             if (!cvpFixedMode && (sk === 'SSD_C1' || sk === 'SSD_C3')) return 0;
+            if (subtract && cvpFixedMode && CVP_CYCLE_KEYS.includes(sk) && cvpCycleEnabled[sk] === false) {
+                const baseSoft = (baseValue + buffer) * multiplier;
+                return applySoftAdjustment(applyPctForSSD(sk, baseSoft, pct), softAdjust);
+            }
             if (subtract && cvpFixedMode) {
                 const fixedMode = get1B3BFixedMode();
                 if (sk === 'SSD_1') {
@@ -558,9 +1068,12 @@ function newFunction() {
                         const acc1B = ssdData && ssdData['SSD_1_B'] ? ssdData['SSD_1_B'].accepted : 0;
                         const spr1B = allMultipliers ? (allMultipliers['SSD_1_B'] || 1) : 1;
                         const ov = overrides || {};
-                        const part1 = Math.max(0, Math.round(acc1 * spr1) - (ov['SSD_C1_1'] || 0));
-                        const part2 = Math.max(0, Math.round(acc1B * spr1B) - (ov['SSD_C1_1B'] || 0));
-                        const bufSub = Math.round((ov['CVP_BUF_1'] || 0) * spr1) + Math.round((ov['CVP_BUF_1B'] || 0) * spr1B);
+                        const cycle1On = cvpCycleEnabled['SSD_1'] !== false;
+                        const cycle1BOn = cvpCycleEnabled['SSD_1_B'] !== false;
+                        const part1 = cycle1On ? Math.max(0, Math.round(acc1 * spr1) - (ov['SSD_C1_1'] || 0)) : 0;
+                        const part2 = cycle1BOn ? Math.max(0, Math.round(acc1B * spr1B) - (ov['SSD_C1_1B'] || 0)) : 0;
+                        const bufSub = (cycle1On ? Math.round((ov['CVP_BUF_1'] || 0) * spr1) : 0) +
+                            (cycle1BOn ? Math.round((ov['CVP_BUF_1B'] || 0) * spr1B) : 0);
                         return Math.max(0, part1 + part2 + bufSub);
                     } else {
                         // 減算モード：入力値合算をそのまま表示
@@ -575,9 +1088,12 @@ function newFunction() {
                         const acc4 = ssdData && ssdData['SSD_4'] ? ssdData['SSD_4'].accepted : 0;
                         const spr4 = allMultipliers ? (allMultipliers['SSD_4'] || 1) : 1;
                         const ov = overrides || {};
-                        const part1 = Math.max(0, Math.round(acc3B * spr3B) - (ov['SSD_C3_3B'] || 0));
-                        const part2 = Math.max(0, Math.round(acc4 * spr4) - (ov['SSD_C3_4'] || 0));
-                        const bufSub = Math.round((ov['CVP_BUF_3B'] || 0) * spr3B) + Math.round((ov['CVP_BUF_4'] || 0) * spr4);
+                        const cycle3BOn = cvpCycleEnabled['SSD_3_B'] !== false;
+                        const cycle4On = cvpCycleEnabled['SSD_4'] !== false;
+                        const part1 = cycle3BOn ? Math.max(0, Math.round(acc3B * spr3B) - (ov['SSD_C3_3B'] || 0)) : 0;
+                        const part2 = cycle4On ? Math.max(0, Math.round(acc4 * spr4) - (ov['SSD_C3_4'] || 0)) : 0;
+                        const bufSub = (cycle3BOn ? Math.round((ov['CVP_BUF_3B'] || 0) * spr3B) : 0) +
+                            (cycle4On ? Math.round((ov['CVP_BUF_4'] || 0) * spr4) : 0);
                         return Math.max(0, part1 + part2 + bufSub);
                     } else {
                         // 減算モード：入力値合算をそのまま表示
@@ -627,13 +1143,53 @@ function newFunction() {
         const saveC1C3Overrides = (v) => setStorage('dsp-c1c3-overrides', v);
         const getCvpApplyEnabled = () => getStorage('dsp-cvp-apply-enabled', true);
         const saveCvpApplyEnabled = (v) => setStorage('dsp-cvp-apply-enabled', !!v);
+        const getCvpCycleEnabled = () => {
+            const stored = getStorage('dsp-cvp-cycle-enabled', CVP_CYCLE_ENABLED_DEFAULTS);
+            const out = {};
+            CVP_CYCLE_KEYS.forEach(key => { out[key] = stored[key] !== false; });
+            return out;
+        };
+        const saveCvpCycleEnabled = (v) => setStorage('dsp-cvp-cycle-enabled', v);
         const getEffectiveC1C3Overrides = () => {
             if (isEightSectorMode()) return {};
             const overrides = getC1C3Overrides();
-            if (getCvpApplyEnabled()) return overrides;
+            if (getCvpApplyEnabled()) return { ...overrides, __cvpCycleEnabled: getCvpCycleEnabled() };
             const effective = { ...overrides, 'SSD_C1': 0, 'SSD_C3': 0 };
             CVP_FIXED_OVERRIDE_KEYS.concat(CVP_BUFFER_OVERRIDE_KEYS).forEach(k => { delete effective[k]; });
             return effective;
+        };
+        const buildBogyoCycleCaps = () => {
+            if (!currentSSDData) return {};
+            const multipliers = getSSDMultipliers();
+            const adjustments = getSSDAdjustments();
+            const softAdjustments = getSSDSoftAdjustments();
+            const overrides = getEffectiveC1C3Overrides();
+            const pct = getSoftPct();
+            const hardPct = getHardPct();
+            const caps = {};
+            getActivePrimaryCycleKeys().forEach(sk => {
+                const data = currentSSDData[sk];
+                if (!data) return;
+                const multiplier = getCycleMultiplier(sk, multipliers);
+                const baseAccepted = getBaseAccepted(sk, data, overrides);
+                const soft = calculateCycleSoft(
+                    sk,
+                    baseAccepted,
+                    adjustments[sk] || 0,
+                    multiplier,
+                    pct,
+                    overrides,
+                    true,
+                    softAdjustments[sk] || 0,
+                    currentSSDData,
+                    multipliers
+                );
+                caps[sk] = {
+                    soft: Math.round(soft),
+                    hard: Math.round(soft * (1 + hardPct / 100))
+                };
+            });
+            return caps;
         };
         const get1B3BFixedMode = () => true;
         // SPR算出パネルの開閉状態（再描画をまたいで保持）
@@ -672,11 +1228,157 @@ function newFunction() {
         };
         const getTimeReqAdjust = () => normalizeTimeReqAdjust(getStorage('dsp-time-req-adjust', {}));
         const saveTimeReqAdjust = (v) => setStorage('dsp-time-req-adjust', normalizeTimeReqAdjust(v));
+
+        // SPR/CVP参照ファイルのBSシートから、SUIにない最長BlockをAdjust用のOpen 0行として補完する。
+        const BS_CACHE_KEY = 'dsp-bs-excel-cache';
+        const normalizeBsHeader = (value) => String(value || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+        const normalizeBsServiceType = (value) => String(value || '').trim().toLowerCase().replace(/[\s_]+/g, ' ');
+        const parseBsDateKey = (value) => {
+            if (value instanceof Date && !isNaN(value.getTime())) {
+                return value.getFullYear() + '/' + String(value.getMonth() + 1).padStart(2, '0') + '/' + String(value.getDate()).padStart(2, '0');
+            }
+            if (typeof value === 'number' && Number.isFinite(value)) {
+                const d = new Date(Date.UTC(1899, 11, 30) + Math.floor(value) * 86400000);
+                return d.getUTCFullYear() + '/' + String(d.getUTCMonth() + 1).padStart(2, '0') + '/' + String(d.getUTCDate()).padStart(2, '0');
+            }
+            const text = String(value || '').trim();
+            const match = /^(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})/.exec(text);
+            if (!match) return '';
+            return match[1] + '/' + String(Number(match[2])).padStart(2, '0') + '/' + String(Number(match[3])).padStart(2, '0');
+        };
+        const parseBsTimeMinutes = (value) => {
+            if (value instanceof Date && !isNaN(value.getTime())) return value.getHours() * 60 + value.getMinutes();
+            if (typeof value === 'number' && Number.isFinite(value)) {
+                if (value >= 0 && value < 1) return Math.round(value * 1440) % 1440;
+                if (value >= 0 && value <= 24) return Math.round(value * 60) % 1440;
+                return Math.round((((value % 1) + 1) % 1) * 1440) % 1440;
+            }
+            const text = String(value || '').trim();
+            const match = /^(\d{1,2}):(\d{2})(?::\d{2})?\s*(午前|午後|am|pm)?$/i.exec(text);
+            if (!match) return null;
+            let hour = Number(match[1]);
+            const minute = Number(match[2]);
+            const period = String(match[3] || '').toLowerCase();
+            if (minute > 59 || hour > 24) return null;
+            if ((period === '午後' || period === 'pm') && hour !== 12) hour += 12;
+            if ((period === '午前' || period === 'am') && hour === 12) hour = 0;
+            return (hour * 60 + minute) % 1440;
+        };
+        const parseBsSheetJson = (json) => {
+            if (!Array.isArray(json) || json.length < 2) return [];
+            const header = json[0] || [];
+            const columns = {};
+            header.forEach((value, index) => { columns[normalizeBsHeader(value)] = index; });
+            const requiredHeaders = ['servicetype', 'starttime', 'ofddate', 'blocklength'];
+            if (requiredHeaders.some(name => columns[name] === undefined)) return [];
+
+            const rows = [];
+            for (let i = 1; i < json.length; i++) {
+                const source = json[i] || [];
+                const serviceType = String(source[columns.servicetype] || '').trim();
+                const timeMinutes = parseBsTimeMinutes(source[columns.starttime]);
+                const dateKey = parseBsDateKey(source[columns.ofddate]);
+                const blockLength = Number(source[columns.blocklength]);
+                if (!serviceType || timeMinutes === null || !dateKey || !Number.isFinite(blockLength) || blockLength <= 0) continue;
+                rows.push({
+                    parent: columns.parent === undefined ? '' : String(source[columns.parent] || '').trim().toUpperCase(),
+                    node: columns.node === undefined ? '' : String(source[columns.node] || '').trim().toUpperCase(),
+                    serviceType,
+                    serviceTypeKey: normalizeBsServiceType(serviceType),
+                    cycle: columns.cycle === undefined ? '' : String(source[columns.cycle] || '').trim(),
+                    timeMinutes,
+                    endMinutes: columns.endtime === undefined ? null : parseBsTimeMinutes(source[columns.endtime]),
+                    dateKey,
+                    blockLength
+                });
+            }
+            return rows;
+        };
+        const saveBsSheetRows = (rows) => {
+            try {
+                if (rows && rows.length) localStorage.setItem(BS_CACHE_KEY, JSON.stringify(rows));
+                else localStorage.removeItem(BS_CACHE_KEY);
+            } catch (error) {
+                console.warn('[SchedulingUI] BSシートのキャッシュ保存に失敗しました', error);
+            }
+        };
+        const getBsSheetRows = () => {
+            try {
+                const cached = localStorage.getItem(BS_CACHE_KEY);
+                return cached ? JSON.parse(cached) : [];
+            } catch (error) {
+                return [];
+            }
+        };
+        const getCurrentBsSheetRows = () => {
+            const selectedDate = formatYMD(resolveBaseDateFromSelectedTab(getSelectedDateText()));
+            const stationCode = getStationCodeFromSelectorTitle();
+            return getBsSheetRows().filter(row => {
+                if (!row || row.dateKey !== selectedDate) return false;
+                if (!stationCode || (!row.parent && !row.node)) return true;
+                return row.parent === stationCode || row.node === stationCode;
+            });
+        };
+        const bsBlockKeyOf = (row) => normalizeBsServiceType(row.serviceType) + '|' +
+            String(row.timeMinutes) + '|' + String(Number(row.blockLength));
+        const buildBsAdjustRows = (suiRows) => {
+            const sourceRows = getCurrentBsSheetRows();
+            const groups = new Map();
+            sourceRows.forEach(row => {
+                const key = row.serviceTypeKey + '|' + row.timeMinutes;
+                if (!groups.has(key)) groups.set(key, []);
+                groups.get(key).push(row);
+            });
+
+            const out = [];
+            groups.forEach(rows => {
+                const sample = rows[0];
+                const eligibleRows = sample.serviceTypeKey === 'amflex kei car sml'
+                    ? rows.filter(row => Number(row.blockLength) <= 3)
+                    : rows;
+                if (eligibleRows.length === 0) return;
+                const maxLength = Math.max(...eligibleRows.map(row => Number(row.blockLength)));
+                const matchingSuiRows = (suiRows || []).filter(td =>
+                    normalizeBsServiceType(td.serviceType) === sample.serviceTypeKey && td.timeMinutes === sample.timeMinutes);
+                const maxExistsInSui = matchingSuiRows.some(td => {
+                    const length = Number(td.blockLength);
+                    return Number.isFinite(length) && Math.abs(length - maxLength) < 0.000001;
+                });
+                if (maxExistsInSui) return;
+
+                eligibleRows.filter(row => Math.abs(Number(row.blockLength) - maxLength) < 0.000001).forEach(row => {
+                    const neighbor = matchingSuiRows[0] || null;
+                    const calculatedEnd = row.endMinutes === null
+                        ? (row.timeMinutes + Math.round(row.blockLength * 60)) % 1440
+                        : row.endMinutes;
+                    const activeKeys = getActivePrimaryCycleKeys();
+                    const bsCycleKey = String(row.cycle || '').trim().toUpperCase();
+                    const ssdGroup = (neighbor && neighbor.ssdGroup)
+                        || (activeKeys.includes(bsCycleKey) ? bsCycleKey : null)
+                        || (isEightSectorMode() ? getSSDFGroup(calculatedEnd) : getSSDGroup(row.timeMinutes));
+                    out.push({
+                        time: minutesToHHMM(row.timeMinutes),
+                        timeMinutes: row.timeMinutes,
+                        deliveryWindowEndMinutes: isEightSectorMode() ? calculatedEnd : null,
+                        serviceType: row.serviceType,
+                        cycle: (neighbor && neighbor.cycle) || row.cycle || ssdGroup || '',
+                        blockLength: row.blockLength,
+                        required: 0,
+                        accepted: 0,
+                        ssdGroup,
+                        isDSP: !!(neighbor && neighbor.isDSP),
+                        isBsOnly: true
+                    });
+                });
+            });
+            return out;
+        };
+        const getAdjustTimeDataList = () => (currentTimeDataList || []).concat(currentBsAdjustDataList || []);
         // td のオブジェクト参照 → 行キー（Cycle | 開始時刻 | Length | サービスタイプ | 出現番号）
-        const buildTimeAdjKeyMap = () => {
+        const buildTimeAdjKeyMap = (list = getAdjustTimeDataList()) => {
             const keyMap = new Map();
             const seen = {};
-            (currentTimeDataList || []).forEach(td => {
+            (list || []).forEach(td => {
                 const base = String(td.ssdGroup || '-') + '|' + String(td.timeMinutes) + '|' + lenKeyOf(td) +
                     '|' + String(td.serviceType === undefined || td.serviceType === null ? '' : td.serviceType);
                 const occ = seen[base] || 0;
@@ -757,9 +1459,11 @@ function newFunction() {
         const saveSprCalcShowSetting = (v) => setStorage('dsp-spr-calc-show-setting', !!v);
         const sprSmallBtnStyle = (on) => 'padding:2px 6px;border-radius:3px;font-size:9px;font-weight:bold;cursor:pointer;white-space:nowrap;' +
             (on ? 'background:#00897B;border:1px solid #00695C;color:#fff;' : 'background:#fff;border:1px solid #ccc;color:#999;');
-        const cvpApplyBtnText = (on) => 'Core ' + (on ? 'ON' : 'OFF');
+        const cvpApplyBtnText = (on) => 'Core All ' + (on ? 'ON' : 'OFF');
         const cvpApplyBtnStyle = (on) => sprSmallBtnStyle(on) +
             'width:100%;padding:1px 2px;box-sizing:border-box;line-height:1.2;';
+        const cvpCycleBtnStyle = (on) => sprSmallBtnStyle(on) +
+            'width:28px;padding:1px 2px;font-size:8px;box-sizing:border-box;line-height:1.2;';
         // ON にする直前のSPR（OFF で復元する）
         const getSprCalcMultBackup = () => getStorage(
             getModeStorageKey('dsp-spr-calc-mult-backup', 'dsp-ssdf-spr-calc-mult-backup'),
@@ -1558,6 +2262,7 @@ function newFunction() {
                 currentSSDData = ssdData;
                 currentTimeDataList = timeDataList;
                 currentBlockDataList = blockDataList;
+                currentBsAdjustDataList = buildBsAdjustRows(timeDataList);
                 currentTotals = { accepted: totalAccepted, required: totalRequired, proDPAccepted, proDPRequired };
 
                 const now = new Date();
@@ -1569,6 +2274,7 @@ function newFunction() {
                     d: getSelectedDateText(),
                     s: ssdData,
                     t: timeDataList.map(td => [td.timeMinutes, td.deliveryWindowEndMinutes, td.providerDeliveryWindowEndMinutes, td.ssdGroup, td.cycle, td.serviceType, td.providerName, td.blockLength, td.required, td.accepted, td.isDSP]),
+                    bs: currentBsAdjustDataList.map(td => [td.timeMinutes, td.ssdGroup, td.cycle, td.serviceType, td.blockLength]),
                     b: blockDataList.map(td => [td.ssdGroup, td.serviceType, td.blockLength, td.required, td.accepted, td.isDSP]),
                     o: currentTotals
                 });
@@ -1969,8 +2675,9 @@ function newFunction() {
             }
 
             const adjust = getTimeReqAdjust();        // delta=0 は normalize で落ちている
-            const adjKeyMap = buildTimeAdjKeyMap();   // td 参照 → 行キー
-            const rows = sortTimeDataForPanel(currentTimeDataList); // 画面『開始時刻別』と同じ並び
+            const adjustRows = getAdjustTimeDataList();
+            const adjKeyMap = buildTimeAdjKeyMap(adjustRows);   // td 参照 → 行キー
+            const rows = sortTimeDataForPanel(adjustRows); // 画面『開始時刻別』と同じ並び
 
             const selectedText = getSelectedDateText();
             const baseDate = resolveBaseDateFromSelectedTab(selectedText);
@@ -2047,8 +2754,9 @@ function newFunction() {
             }
 
             const adjust = getTimeReqAdjust();
-            const adjKeyMap = buildTimeAdjKeyMap();
-            const rows = sortTimeDataForPanel(currentTimeDataList);
+            const adjustRows = getAdjustTimeDataList();
+            const adjKeyMap = buildTimeAdjKeyMap(adjustRows);
+            const rows = sortTimeDataForPanel(adjustRows);
             const baseDate = resolveBaseDateFromSelectedTab(getSelectedDateText());
             const targetDate = formatYMD(baseDate);
             const nodeCode = getStationCodeFromSelectorTitle();
@@ -2748,6 +3456,7 @@ function newFunction() {
                 currentSSDData = null;
                 currentTimeDataList = [];
                 currentBlockDataList = [];
+                currentBsAdjustDataList = [];
                 lastRenderSignature = '';
                 calculateAndDisplay();
                 openTimeRangeSettings();
@@ -2781,7 +3490,8 @@ function newFunction() {
             keys.forEach(k => { map[k] = {}; });
 
             const lenSet = {};
-            (currentBlockDataList || []).forEach(td => {
+            const matrixRows = (currentBlockDataList || []).concat(currentBsAdjustDataList || []);
+            matrixRows.forEach(td => {
                 const k = td.ssdGroup;
                 if (!k || !map[k]) return;
                 const lenKey = lenKeyOf(td);
@@ -2793,8 +3503,9 @@ function newFunction() {
             const applyAdjust = !!useAdjust && basis === 'required';
             if (applyAdjust) {
                 const adjust = getTimeReqAdjust();
-                const adjKeyMap = buildTimeAdjKeyMap();
-                (currentTimeDataList || []).forEach(td => {
+                const adjustRows = getAdjustTimeDataList();
+                const adjKeyMap = buildTimeAdjKeyMap(adjustRows);
+                adjustRows.forEach(td => {
                     const k = td.ssdGroup;
                     if (!k || !map[k]) return;
                     const lenKey = lenKeyOf(td);
@@ -3334,23 +4045,30 @@ function newFunction() {
                 '</div>';
 
             // ---- 右パネル：開始時刻別 ----
-            const sortedTimeData = sortTimeDataForPanel(currentTimeDataList);
+            const adjustTimeData = getAdjustTimeDataList();
+            const sortedTimeData = sortTimeDataForPanel(adjustTimeData);
+            const allBsSheetRows = getBsSheetRows();
+            const hasBsSheetData = allBsSheetRows.length > 0;
+            // 赤色判定はBS全体の service_type × start_time × blocklength だけで照合する。
+            const currentBsBlockKeys = new Set(allBsSheetRows.map(bsBlockKeyOf));
 
             const yardCapacity = getYardCapacity();
             // Yard capacity 超過判定でも使用する必須adjust（行ごと）
-            const timeAdjKeyMap = buildTimeAdjKeyMap();
+            const timeAdjKeyMap = buildTimeAdjKeyMap(adjustTimeData);
 
             // === 開始時刻別パネル描画 ===
             const buildTimePanelHtml = (showAdjust) => {
                 // 再描画のたびに最新値を読む（トグルで入力値が消えないように）
                 const timeAdjValues = getTimeReqAdjust();
                 const adjustedRequiredByTime = {};
+                const acceptedByTime = {};
                 for (let ri = 0; ri < sortedTimeData.length; ri++) {
                     const td = sortedTimeData[ri];
                     const delta = normalizeTimeAdjDelta(timeAdjValues[timeAdjKeyMap.get(td)]);
                     const adjustedRequired = Math.max(0, Number(td.required || 0) + delta);
                     const key = td.timeMinutes;
                     adjustedRequiredByTime[key] = (adjustedRequiredByTime[key] || 0) + adjustedRequired;
+                    acceptedByTime[key] = (acceptedByTime[key] || 0) + Number(td.accepted || 0);
                 }
                 const timeGridCols = showAdjust
                     ? '60px 44px 132px 40px 38px 38px 42px'
@@ -3359,8 +4077,9 @@ function newFunction() {
                 for (let ti = 0; ti < sortedTimeData.length; ti++) {
                     const td = sortedTimeData[ti];
                     const lengthText = (td.blockLength === '' || td.blockLength === undefined || td.blockLength === null) ? '-' : td.blockLength;
-                    const timeTotal = adjustedRequiredByTime[td.timeMinutes] || 0;
-                    const isOver = timeTotal > yardCapacity;
+                    const requiredTotal = adjustedRequiredByTime[td.timeMinutes] || 0;
+                    const acceptedTotal = acceptedByTime[td.timeMinutes] || 0;
+                    const isOver = requiredTotal > yardCapacity || acceptedTotal > yardCapacity;
                     const rowStyle = isOver
                         ? 'background:#ffebee;border-left:3px solid #f44336;'
                         : 'background:#f5f5f5;';
@@ -3368,6 +4087,9 @@ function newFunction() {
                     const timeText24 = minutesToHHMM(td.timeMinutes);
                     const adjRowKey = timeAdjKeyMap.get(td) || '';
                     const adjRowVal = timeAdjValues[adjRowKey] || 0;
+                    const isMissingFromBs = hasBsSheetData && !td.isBsOnly && !currentBsBlockKeys.has(bsBlockKeyOf(td));
+                    const adjInputBg = isMissingFromBs ? '#ffebee' : '#fff';
+                    const adjInputBorder = isMissingFromBs ? '#ef9a9a' : '#90CAF9';
                     timeRowsHtml +=
                         '<div style="display:grid;grid-template-columns:' + timeGridCols + ';gap:6px;margin:3px 0;padding:6px 8px;' + rowStyle + 'border-radius:3px;align-items:center;">' +
                         '<span style="font-size:10px;font-weight:bold;color:#1565C0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(cycleLabel) + '</span>' +
@@ -3379,7 +4101,7 @@ function newFunction() {
                         (showAdjust
                             ? '<input type="number" class="dsp-time-adj" data-key="' + escapeHtml(adjRowKey) + '"' +
                             ' value="' + (adjRowVal ? adjRowVal : '') + '" step="1" min="-999" max="999" placeholder="±0"' +
-                            ' style="width:100%;padding:2px;border:1px solid #90CAF9;border-radius:3px;text-align:center;font-size:10px;box-sizing:border-box;color:#2196F3;font-weight:bold;" />'
+                            ' style="width:100%;padding:2px;border:1px solid ' + adjInputBorder + ';background:' + adjInputBg + ';border-radius:3px;text-align:center;font-size:10px;box-sizing:border-box;color:#2196F3;font-weight:bold;" />'
                             : '') +
                         '</div>';
                 }
@@ -3436,6 +4158,14 @@ function newFunction() {
 
             // ---- 左パネル：CVP入力フィールド (4項目) ----
             const cvpApplyOn = getCvpApplyEnabled();
+            const cvpCycleEnabled = getCvpCycleEnabled();
+            const cvpCycleCellHtml = (key) => {
+                const on = cvpCycleEnabled[key] !== false;
+                return '<div style="display:grid;grid-template-columns:28px 1fr;gap:2px;align-items:center;">' +
+                    '<button type="button" class="cvp-cycle-toggle" data-cycle="' + key + '" style="' + cvpCycleBtnStyle(on) + '">' + (on ? 'ON' : 'OFF') + '</button>' +
+                    '<label style="font-size:9px;color:#555;font-weight:bold;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(ssdLabel(key)) + '</label>' +
+                    '</div>';
+            };
             const storedOv = getC1C3Overrides();
             const valC1_1 = storedOv['SSD_C1_1'] || 0;
             const valC1_1B = storedOv['SSD_C1_1B'] || 0;
@@ -3449,26 +4179,26 @@ function newFunction() {
             overrides['SSD_C1'] = valC1_1 + valC1_1B;
             overrides['SSD_C3'] = valC3_3B + valC3_4;
             const c1c3InputHtml =
-                '<div style="display:grid;grid-template-columns:60px 1fr 1fr;gap:2px 4px;align-items:center;">' +
+                '<div style="display:grid;grid-template-columns:76px 1fr 1fr;gap:2px 4px;align-items:center;">' +
                 '<button id="cvp-apply-toggle" style="' + cvpApplyBtnStyle(cvpApplyOn) + '">' + cvpApplyBtnText(cvpApplyOn) + '</button>' +
                 '<span style="text-align:center;font-size:9px;color:#9C27B0;font-weight:bold;">CVP</span>' +
                 '<span style="text-align:center;font-size:9px;color:#f44336;font-weight:bold;">Buffer</span>' +
-                '<label style="font-size:10px;color:#555;font-weight:bold;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(ssdLabel('SSD_1')) + '</label>' +
+                cvpCycleCellHtml('SSD_1') +
                 '<input type="number" id="cvp-SSD_C1_1" value="' + valC1_1 + '" step="1" min="0" max="9999"' +
                 ' style="width:100%;padding:4px;border:2px solid #CE93D8;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;color:#9C27B0;font-weight:bold;" />' +
                 '<input type="number" id="cvp-buf-1" value="' + cvpBuf1 + '" step="1" min="-999" max="999"' +
                 ' style="width:100%;padding:4px;border:2px solid #ffcdd2;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;color:#f44336;font-weight:bold;" />' +
-                '<label style="font-size:10px;color:#555;font-weight:bold;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(ssdLabel('SSD_1_B')) + '</label>' +
+                cvpCycleCellHtml('SSD_1_B') +
                 '<input type="number" id="cvp-SSD_C1_1B" value="' + valC1_1B + '" step="1" min="0" max="9999"' +
                 ' style="width:100%;padding:4px;border:2px solid #CE93D8;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;color:#9C27B0;font-weight:bold;" />' +
                 '<input type="number" id="cvp-buf-1b" value="' + cvpBuf1B + '" step="1" min="-999" max="999"' +
                 ' style="width:100%;padding:4px;border:2px solid #ffcdd2;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;color:#f44336;font-weight:bold;" />' +
-                '<label style="font-size:10px;color:#555;font-weight:bold;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(ssdLabel('SSD_3_B')) + '</label>' +
+                cvpCycleCellHtml('SSD_3_B') +
                 '<input type="number" id="cvp-SSD_C3_3B" value="' + valC3_3B + '" step="1" min="0" max="9999"' +
                 ' style="width:100%;padding:4px;border:2px solid #CE93D8;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;color:#9C27B0;font-weight:bold;" />' +
                 '<input type="number" id="cvp-buf-3b" value="' + cvpBuf3B + '" step="1" min="-999" max="999"' +
                 ' style="width:100%;padding:4px;border:2px solid #ffcdd2;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;color:#f44336;font-weight:bold;" />' +
-                '<label style="font-size:10px;color:#555;font-weight:bold;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(ssdLabel('SSD_4')) + '</label>' +
+                cvpCycleCellHtml('SSD_4') +
                 '<input type="number" id="cvp-SSD_C3_4" value="' + valC3_4 + '" step="1" min="0" max="9999"' +
                 ' style="width:100%;padding:4px;border:2px solid #CE93D8;border-radius:4px;text-align:center;font-size:12px;box-sizing:border-box;color:#9C27B0;font-weight:bold;" />' +
                 '<input type="number" id="cvp-buf-4" value="' + cvpBuf4 + '" step="1" min="-999" max="999"' +
@@ -3552,7 +4282,7 @@ function newFunction() {
                 '</div>' +
                 ssdRowsHtml +
                 '<div style="padding-top:10px;border-top:1px solid #ddd;display:flex;gap:6px;">' +
-                '<button id="dl-btn" style="flex:5;padding:5px;background:#4CAF50;color:white;border:none;border-radius:5px;cursor:pointer;font-size:12px;font-weight:bold;">Cap Set File</button>' +
+                '<button id="dl-btn" style="flex:5;padding:5px;background:#4CAF50;color:white;border:none;border-radius:5px;cursor:pointer;font-size:12px;font-weight:bold;">BOGYO CapSet</button>' +
                 '<button id="dl-fill-btn" style="flex:1;padding:5px;background:#FF9800;color:white;border:none;border-radius:5px;cursor:pointer;font-size:11px;font-weight:bold;white-space:nowrap;">Fill</button>' +
                 '<button id="dl-1d-btn" style="flex:1;padding:5px;background:#1E88E5;color:white;border:none;border-radius:5px;cursor:pointer;font-size:11px;font-weight:bold;white-space:nowrap;">1D</button>' +
                 '<button id="dl-future-req-btn" style="flex:1;padding:5px;background:#1E88E5;color:white;border:none;border-radius:5px;cursor:pointer;font-size:11px;font-weight:bold;white-space:nowrap;">1W</button>' +
@@ -3682,6 +4412,18 @@ function newFunction() {
                 this.textContent = cvpApplyBtnText(next);
                 this.style.cssText = cvpApplyBtnStyle(next);
                 refreshCycleValues();
+            });
+            leftPanel.querySelectorAll('.cvp-cycle-toggle').forEach(function (button) {
+                button.addEventListener('click', function () {
+                    const cycle = this.dataset.cycle;
+                    if (!CVP_CYCLE_KEYS.includes(cycle)) return;
+                    const enabled = getCvpCycleEnabled();
+                    enabled[cycle] = !enabled[cycle];
+                    saveCvpCycleEnabled(enabled);
+                    this.textContent = enabled[cycle] ? 'ON' : 'OFF';
+                    this.style.cssText = cvpCycleBtnStyle(enabled[cycle]);
+                    refreshCycleValues();
+                });
             });
 
             // 右上に全体表示/非表示ボタン
@@ -3818,6 +4560,7 @@ function newFunction() {
             });
 
             var actSprMessage = '';
+            var bsSheetMessage = '';
 
             var processSPRExcelData = function (data, showAlert) {
                 try {
@@ -3849,7 +4592,26 @@ function newFunction() {
                         actSprMessage = '\nActSPRシートが見つかりませんでした。';
                     }
 
+                    // BSシート → SUIに存在しない最長BlockのAdjust用候補
+                    bsSheetMessage = '';
+                    var bsName = null;
+                    for (var bi = 0; bi < wb.SheetNames.length; bi++) {
+                        if (String(wb.SheetNames[bi]).trim().toLowerCase() === 'bs') { bsName = wb.SheetNames[bi]; break; }
+                    }
+                    if (bsName) {
+                        var bsJson = XLSX.utils.sheet_to_json(wb.Sheets[bsName], { header: 1, defval: '' });
+                        var bsRows = parseBsSheetJson(bsJson);
+                        saveBsSheetRows(bsRows);
+                        bsSheetMessage = bsRows.length > 0
+                            ? '\nBS: ' + bsRows.length + '行をAdjust候補として読み込みました。'
+                            : '\nBSシートから必要な列または値を読み取れませんでした。';
+                    } else {
+                        saveBsSheetRows([]);
+                    }
+
                     applySPRFromJson(json, showAlert);
+                    lastRenderSignature = '';
+                    calculateAndDisplay();
                 } catch (err) {
                     if (showAlert) alert('Excel読み込みエラー: ' + err.message);
                 }
@@ -3862,7 +4624,7 @@ function newFunction() {
                     saveCvpVol(getCvpVolDefaults());
                     renderSprCalcBody();
                     applyDerivedSprToMultipliers();
-                    if (showAlert) alert('8 Sectorでは既存6 Sector形式のSPR/CVP値を割り当てません。\nSSDF名のActSPRシートだけを反映します。' + actSprMessage);
+                    if (showAlert) alert('8 Sectorでは既存6 Sector形式のSPR/CVP値を割り当てません。\nSSDF名のActSPRシートだけを反映します。' + actSprMessage + bsSheetMessage);
                     return;
                 }
                 var headerRow = json[0];
@@ -3965,7 +4727,7 @@ function newFunction() {
                 refreshCycleValues();
                 renderSprCalcBody();
                 applyDerivedSprToMultipliers();
-                if (showAlert) alert('SPR/CVPを反映しました。' + actSprMessage);
+                if (showAlert) alert('SPR/CVPを反映しました。' + actSprMessage + bsSheetMessage);
             };
 
             // 日付変更時にキャッシュからSPR自動反映
@@ -4069,7 +4831,45 @@ function newFunction() {
                 refreshCycleValues();
             });
 
-            document.getElementById('dl-btn')?.addEventListener('click', downloadExcel);
+            document.getElementById('dl-btn')?.addEventListener('click', function () {
+                const selectedDateText = getSelectedDateText();
+                if (!parseMonthDayFromText(selectedDateText)) {
+                    alert('SUIで選択中の日付を取得できませんでした。');
+                    return;
+                }
+
+                const nodeCode = getStationCodeFromSelectorTitle();
+                if (!nodeCode) {
+                    alert('SUIで選択中のNodeを取得できませんでした。');
+                    return;
+                }
+
+                const selectedDate = resolveBaseDateFromSelectedTab(selectedDateText);
+                const dateValue = selectedDate.getFullYear() + '-'
+                    + String(selectedDate.getMonth() + 1).padStart(2, '0') + '-'
+                    + String(selectedDate.getDate()).padStart(2, '0');
+                const bogyoCaps = buildBogyoCycleCaps();
+                if (Object.keys(bogyoCaps).length === 0) {
+                    alert('BOGYOへ連携するCycle別Soft/Hard値を取得できませんでした。');
+                    return;
+                }
+                try {
+                    GM_setValue('schedulingui-bogyo-capset-request', JSON.stringify({
+                        date: dateValue,
+                        node: nodeCode,
+                        caps: bogyoCaps,
+                        requestedAt: Date.now()
+                    }));
+                } catch (error) {
+                    console.warn('[SchedulingUI] BOGYO連携データを保存できませんでした', error);
+                }
+
+                const bogyoUrl = new URL(BOGYO_CAP_SET_URL);
+                bogyoUrl.searchParams.set('suiAuto', '1');
+                bogyoUrl.searchParams.set('suiDate', dateValue);
+                bogyoUrl.searchParams.set('suiNode', nodeCode);
+                window.open(bogyoUrl.toString(), '_blank', 'noopener,noreferrer');
+            });
             document.getElementById('dl-fill-btn')?.addEventListener('click', startFillSummaryDownload);
             document.getElementById('dl-1d-btn')?.addEventListener('click', downloadOneDayExcel);
             document.getElementById('dl-future-req-btn')?.addEventListener('click', downloadFutureRequiredExcel);
