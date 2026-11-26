@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      23.2
+// @version      23.4
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -233,6 +233,201 @@ async function initBogyoCapSetAutomation() {
 
     const findBogyoReasonChoice = (trigger) => findVisibleDropdownChoices(trigger)[0] || null;
 
+    let bogyoConfirmationStyleReady = false;
+    const ensureBogyoConfirmationStyles = () => {
+        if (bogyoConfirmationStyleReady) return;
+        const css = [
+            '#schedulingui-bogyo-confirm{background:#111;color:#fff;border:2px solid #fff;border-radius:8px;padding:18px;min-width:820px;max-width:92vw;box-sizing:border-box;font-family:Arial,sans-serif;font-size:12px;box-shadow:0 6px 24px rgba(0,0,0,.45);}',
+            '#schedulingui-bogyo-confirm::backdrop{background:rgba(0,0,0,.65);}',
+            '#schedulingui-bogyo-confirm h2{color:#fff;margin:0 0 10px;padding:0 0 8px;border-bottom:2px solid #fff;font-size:18px;}',
+            '#schedulingui-bogyo-confirm p{color:#fff;margin:8px 0;}',
+            '#schedulingui-bogyo-confirm table{width:100%;table-layout:fixed;border-collapse:collapse;background:#111;color:#fff;}',
+            '#schedulingui-bogyo-confirm thead{background:#1b3a34;}',
+            '#schedulingui-bogyo-confirm tbody tr:nth-child(even){background:#1a1a1a;}',
+            '#schedulingui-bogyo-confirm th,#schedulingui-bogyo-confirm td{width:auto;border:1px solid #666;padding:6px;text-align:center;white-space:nowrap;color:#fff;}',
+            '#schedulingui-bogyo-confirm th{color:#a5d6a7;font-weight:bold;}',
+            '#schedulingui-bogyo-confirm button{background:#222;color:#fff;border:1px solid #aaa;border-radius:3px;padding:4px 8px;font-weight:bold;cursor:pointer;}',
+            '#schedulingui-bogyo-confirm button[aria-pressed="false"]{background:#c62828;border-color:#ef9a9a;}',
+            '#schedulingui-bogyo-confirm button[aria-pressed="true"]{background:#00796b;border-color:#80cbc4;}',
+            '#schedulingui-bogyo-confirm button:disabled{background:#555;color:#bbb;cursor:not-allowed;}',
+            '#schedulingui-bogyo-confirm button[aria-pressed="false"]:disabled{background:#8e0000;color:#ddd;border-color:#ef9a9a;}',
+            '#schedulingui-bogyo-actions{text-align:right;margin-top:12px;}',
+            '#schedulingui-bogyo-actions button{min-width:72px;padding:6px 12px;}',
+            '#schedulingui-bogyo-execute{background:#00796b!important;border-color:#80cbc4!important;color:#fff!important;}',
+            '#schedulingui-bogyo-cancel{background:#37474f!important;border-color:#78909c!important;color:#fff!important;}',
+            '#schedulingui-bogyo-confirm .bogyo-cap-arrow{display:inline-block;margin-left:6px;border:none;padding:0;font-family:"Segoe UI Symbol","Arial Unicode MS",sans-serif;font-size:16px;font-weight:bold;line-height:1;vertical-align:middle;}',
+            '#schedulingui-bogyo-confirm .bogyo-cap-arrow-up{color:#42a5f5;transform:rotate(-90deg);}',
+            '#schedulingui-bogyo-confirm .bogyo-cap-arrow-down{color:#ef5350;transform:rotate(90deg);}',
+            '#schedulingui-bogyo-confirm .bogyo-cap-arrow-same{color:#aaa;transform:none;}'
+        ].join('');
+        try {
+            if (typeof CSSStyleSheet === 'function' && 'adoptedStyleSheets' in document) {
+                const sheet = new CSSStyleSheet();
+                sheet.replaceSync(css);
+                document.adoptedStyleSheets = Array.from(document.adoptedStyleSheets).concat(sheet);
+                bogyoConfirmationStyleReady = true;
+                return;
+            }
+        } catch (error) { }
+        const style = document.createElement('style');
+        style.textContent = css;
+        document.head.appendChild(style);
+        bogyoConfirmationStyleReady = true;
+    };
+
+    const showBogyoCapSetConfirmation = (cycleNames, targetCaps) => new Promise(resolve => {
+        ensureBogyoConfirmationStyles();
+        const dialog = document.createElement('dialog');
+        dialog.id = 'schedulingui-bogyo-confirm';
+        dialog.setAttribute('aria-label', 'BOGYO CapSet確認');
+
+        const title = document.createElement('h2');
+        title.textContent = 'BOGYO CapSet確認';
+        dialog.appendChild(title);
+
+        const summary = document.createElement('p');
+        summary.textContent = 'OFD Date: ' + targetDate + ' / Node: ' + targetNode;
+        dialog.appendChild(summary);
+
+        const guide = document.createElement('p');
+        guide.textContent = 'ONのCycleだけCapSetします。内容を確認してから実行してください。';
+        dialog.appendChild(guide);
+
+        const table = document.createElement('table');
+        table.setAttribute('border', '1');
+        table.setAttribute('cellpadding', '6');
+        table.setAttribute('cellspacing', '0');
+        const thead = document.createElement('thead');
+        const headerRow = document.createElement('tr');
+        ['実行', 'Cycle', 'Before Soft', 'After Soft', 'Before Hard', 'After Hard', '状態'].forEach(text => {
+            const th = document.createElement('th');
+            th.textContent = text;
+            headerRow.appendChild(th);
+        });
+        thead.appendChild(headerRow);
+        table.appendChild(thead);
+
+        const tbody = document.createElement('tbody');
+        const enabled = {};
+        cycleNames.forEach(cycle => {
+            const info = findBogyoCycleRow(cycle);
+            if (!info) return;
+            const cells = info.row.querySelectorAll('td');
+            const readNumber = index => {
+                const text = normalizeText(cells[index]?.textContent).replace(/,/g, '');
+                if (text === '' || text === '-') return null;
+                const value = Number(text);
+                return Number.isFinite(value) ? value : null;
+            };
+            const beforeSoft = readNumber(info.softIndex);
+            const beforeHard = readNumber(info.hardIndex);
+            const sourceSoft = readNumber(info.sourceSoftIndex);
+            const sourceHard = readNumber(info.sourceHardIndex);
+            const afterSoft = Math.round(Number(targetCaps[cycle].soft));
+            const afterHard = Math.round(Number(targetCaps[cycle].hard));
+            const softDirection = sourceSoft === null ? 0 : Math.sign(afterSoft - sourceSoft);
+            const hardDirection = sourceHard === null ? 0 : Math.sign(afterHard - sourceHard);
+            const directionMismatch = softDirection !== 0 && hardDirection !== 0 && softDirection !== hardDirection;
+            const unchanged = beforeSoft === afterSoft && beforeHard === afterHard;
+            enabled[cycle] = !directionMismatch && !unchanged;
+
+            const row = document.createElement('tr');
+            const toggleCell = document.createElement('td');
+            const toggle = document.createElement('button');
+            toggle.type = 'button';
+            toggle.textContent = enabled[cycle] ? 'ON' : 'OFF';
+            toggle.setAttribute('aria-pressed', enabled[cycle] ? 'true' : 'false');
+            toggle.disabled = directionMismatch;
+            if (directionMismatch) toggle.title = 'Soft/Hardの方向不一致により設定できません';
+            toggle.addEventListener('click', () => {
+                enabled[cycle] = !enabled[cycle];
+                toggle.textContent = enabled[cycle] ? 'ON' : 'OFF';
+                toggle.setAttribute('aria-pressed', enabled[cycle] ? 'true' : 'false');
+            });
+            toggleCell.appendChild(toggle);
+            row.appendChild(toggleCell);
+
+            const appendTextCell = value => {
+                const td = document.createElement('td');
+                td.textContent = String(value);
+                row.appendChild(td);
+            };
+            appendTextCell(cycle);
+            appendTextCell(beforeSoft === null ? '-' : beforeSoft);
+
+            const afterSoftCell = document.createElement('td');
+            afterSoftCell.appendChild(document.createTextNode(String(afterSoft)));
+            const softChange = beforeSoft === null ? 0 : Math.sign(afterSoft - beforeSoft);
+            const arrow = document.createElement('span');
+            arrow.className = 'bogyo-cap-arrow ' + (softChange > 0
+                ? 'bogyo-cap-arrow-up'
+                : (softChange < 0 ? 'bogyo-cap-arrow-down' : 'bogyo-cap-arrow-same'));
+            arrow.textContent = '➜';
+            arrow.title = softChange > 0 ? 'Soft増加' : (softChange < 0 ? 'Soft減少' : 'Soft変更なし');
+            afterSoftCell.appendChild(arrow);
+            row.appendChild(afterSoftCell);
+
+            appendTextCell(beforeHard === null ? '-' : beforeHard);
+
+            const afterHardCell = document.createElement('td');
+            afterHardCell.appendChild(document.createTextNode(String(afterHard)));
+            const hardChange = beforeHard === null ? 0 : Math.sign(afterHard - beforeHard);
+            const hardArrow = document.createElement('span');
+            hardArrow.className = 'bogyo-cap-arrow ' + (hardChange > 0
+                ? 'bogyo-cap-arrow-up'
+                : (hardChange < 0 ? 'bogyo-cap-arrow-down' : 'bogyo-cap-arrow-same'));
+            hardArrow.textContent = '➜';
+            hardArrow.title = hardChange > 0 ? 'Hard増加' : (hardChange < 0 ? 'Hard減少' : 'Hard変更なし');
+            afterHardCell.appendChild(hardArrow);
+            row.appendChild(afterHardCell);
+
+            appendTextCell(directionMismatch ? '設定不可' : (unchanged ? '変更なし' : '変更あり'));
+            tbody.appendChild(row);
+        });
+        table.appendChild(tbody);
+        dialog.appendChild(table);
+
+        const actions = document.createElement('p');
+        actions.id = 'schedulingui-bogyo-actions';
+        const executeButton = document.createElement('button');
+        executeButton.id = 'schedulingui-bogyo-execute';
+        executeButton.type = 'button';
+        executeButton.textContent = '実行';
+        const cancelButton = document.createElement('button');
+        cancelButton.id = 'schedulingui-bogyo-cancel';
+        cancelButton.type = 'button';
+        cancelButton.textContent = 'キャンセル';
+        actions.appendChild(executeButton);
+        actions.appendChild(document.createTextNode(' '));
+        actions.appendChild(cancelButton);
+        dialog.appendChild(actions);
+
+        let settled = false;
+        const finish = result => {
+            if (settled) return;
+            settled = true;
+            dialog.close();
+            dialog.remove();
+            resolve(result);
+        };
+        executeButton.addEventListener('click', () => {
+            const selected = cycleNames.filter(cycle => enabled[cycle]);
+            if (!selected.length) {
+                alert('実行するCycleを1つ以上ONにしてください。');
+                return;
+            }
+            finish(selected);
+        });
+        cancelButton.addEventListener('click', () => finish(null));
+        dialog.addEventListener('cancel', event => {
+            event.preventDefault();
+            finish(null);
+        });
+
+        document.body.appendChild(dialog);
+        dialog.showModal();
+    });
+
     const completedCycles = [];
     const skippedCycles = [];
     const originalPageTitle = document.title;
@@ -346,9 +541,17 @@ async function initBogyoCapSetAutomation() {
         const sourceCapsLoaded = await waitFor(() => areBogyoSourceCapsLoaded(targetCycles), 60000);
         if (!sourceCapsLoaded) throw new Error('BOGYOのOTR・CvP・Soft Cap・Hard Capが読み込まれませんでした');
 
+        setBogyoStatus('CapSet確認待ち…');
+        const cyclesToProcess = await showBogyoCapSetConfirmation(targetCycles, targetCaps);
+        if (!cyclesToProcess) {
+            console.info('[SchedulingUI] BOGYO CapSetはユーザーによりキャンセルされました:', targetDate, targetNode);
+            return;
+        }
+        console.info('[SchedulingUI] BOGYO CapSet対象Cycle:', cyclesToProcess);
+
         const completedReasons = {};
-        for (let cycleIndex = 0; cycleIndex < targetCycles.length; cycleIndex++) {
-            const targetCycle = targetCycles[cycleIndex];
+        for (let cycleIndex = 0; cycleIndex < cyclesToProcess.length; cycleIndex++) {
+            const targetCycle = cyclesToProcess[cycleIndex];
             const targetCap = targetCaps[targetCycle];
             const softValue = Math.round(Number(targetCap.soft));
             const hardValue = Math.round(Number(targetCap.hard));
@@ -493,7 +696,7 @@ async function initBogyoCapSetAutomation() {
         }
 
         setBogyoStatus(skippedCycles.length ? 'CapSet完了（一部スキップ）' : 'CapSet完了');
-        const reasonSummary = targetCycles.map(cycle => cycle + ': ' + (completedReasons[cycle] || '未処理')).join('\n');
+        const reasonSummary = cyclesToProcess.map(cycle => cycle + ': ' + (completedReasons[cycle] || '未処理')).join('\n');
         alert('BOGYO CapSetが完了しました。\n' + reasonSummary);
         console.info('[SchedulingUI] BOGYO CapSet完了:', targetDate, targetNode, {
             completed: completedCycles,
