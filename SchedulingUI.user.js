@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      23.4
+// @version      23.5
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -299,7 +299,7 @@ async function initBogyoCapSetAutomation() {
         table.setAttribute('cellspacing', '0');
         const thead = document.createElement('thead');
         const headerRow = document.createElement('tr');
-        ['実行', 'Cycle', 'Before Soft', 'After Soft', 'Before Hard', 'After Hard', '状態'].forEach(text => {
+        ['実行', 'Cycle', 'Before Soft', 'After Soft', 'Before Hard', 'After Hard'].forEach(text => {
             const th = document.createElement('th');
             th.textContent = text;
             headerRow.appendChild(th);
@@ -321,15 +321,10 @@ async function initBogyoCapSetAutomation() {
             };
             const beforeSoft = readNumber(info.softIndex);
             const beforeHard = readNumber(info.hardIndex);
-            const sourceSoft = readNumber(info.sourceSoftIndex);
-            const sourceHard = readNumber(info.sourceHardIndex);
             const afterSoft = Math.round(Number(targetCaps[cycle].soft));
             const afterHard = Math.round(Number(targetCaps[cycle].hard));
-            const softDirection = sourceSoft === null ? 0 : Math.sign(afterSoft - sourceSoft);
-            const hardDirection = sourceHard === null ? 0 : Math.sign(afterHard - sourceHard);
-            const directionMismatch = softDirection !== 0 && hardDirection !== 0 && softDirection !== hardDirection;
             const unchanged = beforeSoft === afterSoft && beforeHard === afterHard;
-            enabled[cycle] = !directionMismatch && !unchanged;
+            enabled[cycle] = !unchanged;
 
             const row = document.createElement('tr');
             const toggleCell = document.createElement('td');
@@ -337,8 +332,6 @@ async function initBogyoCapSetAutomation() {
             toggle.type = 'button';
             toggle.textContent = enabled[cycle] ? 'ON' : 'OFF';
             toggle.setAttribute('aria-pressed', enabled[cycle] ? 'true' : 'false');
-            toggle.disabled = directionMismatch;
-            if (directionMismatch) toggle.title = 'Soft/Hardの方向不一致により設定できません';
             toggle.addEventListener('click', () => {
                 enabled[cycle] = !enabled[cycle];
                 toggle.textContent = enabled[cycle] ? 'ON' : 'OFF';
@@ -380,8 +373,6 @@ async function initBogyoCapSetAutomation() {
             hardArrow.title = hardChange > 0 ? 'Hard増加' : (hardChange < 0 ? 'Hard減少' : 'Hard変更なし');
             afterHardCell.appendChild(hardArrow);
             row.appendChild(afterHardCell);
-
-            appendTextCell(directionMismatch ? '設定不可' : (unchanged ? '変更なし' : '変更あり'));
             tbody.appendChild(row);
         });
         table.appendChild(tbody);
