@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      23.6
+// @version      23.7
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -315,7 +315,7 @@ async function initBogyoCapSetAutomation() {
             '#schedulingui-bogyo-confirm .bogyo-cap-arrow-up{color:#42a5f5;transform:rotate(-90deg);}',
             '#schedulingui-bogyo-confirm .bogyo-cap-arrow-down{color:#ef5350;transform:rotate(90deg);}',
             '#schedulingui-bogyo-confirm .bogyo-cap-arrow-same{color:#aaa;transform:none;}',
-            '#schedulingui-bogyo-status{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:2147483647;min-width:180px;padding:24px 40px;border-radius:8px;background:rgba(0,0,0,.82);color:#fff;font:700 28px/1.4 Arial,sans-serif;text-align:center;box-shadow:0 4px 16px rgba(0,0,0,.35);pointer-events:none;}'
+            '#schedulingui-bogyo-status{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:2147483647;min-width:220px;padding:28px 48px;border-radius:8px;background:rgba(0,0,0,.82);color:#fff;font:700 36px/1.4 Arial,sans-serif;text-align:center;box-shadow:0 4px 16px rgba(0,0,0,.35);pointer-events:none;}'
         ].join('');
         try {
             if (typeof CSSStyleSheet === 'function' && 'adoptedStyleSheets' in document) {
