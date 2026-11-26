@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      23.5
+// @version      23.6
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -170,6 +170,58 @@ async function initBogyoCapSetAutomation() {
         });
     });
 
+    const readBogyoCellNumber = (cells, index) => {
+        const text = normalizeText(cells[index]?.textContent).replace(/,/g, '');
+        if (text === '' || text === '-') return null;
+        const value = Number(text);
+        return Number.isFinite(value) ? value : null;
+    };
+
+    const buildAdjustedBogyoCaps = (cycleNames, requestedCaps) => {
+        const adjusted = {};
+        cycleNames.forEach(cycle => {
+            const info = findBogyoCycleRow(cycle);
+            if (!info) return;
+            const cells = info.row.querySelectorAll('td');
+            const sourceSoftRaw = readBogyoCellNumber(cells, info.sourceSoftIndex);
+            const sourceHardRaw = readBogyoCellNumber(cells, info.sourceHardIndex);
+            const sourceSoft = sourceSoftRaw === null ? null : Math.floor(sourceSoftRaw);
+            const sourceHard = sourceHardRaw === null ? null : Math.floor(sourceHardRaw);
+            const requestedSoft = Math.round(Number(requestedCaps[cycle].soft));
+            const requestedHard = Math.round(Number(requestedCaps[cycle].hard));
+            let direction = null;
+            if (sourceSoft !== null && requestedSoft > sourceSoft) direction = 'increase';
+            else if (sourceSoft !== null && requestedSoft < sourceSoft) direction = 'decrease';
+            else if (sourceHard !== null && requestedHard > sourceHard) direction = 'increase';
+            else if (sourceHard !== null && requestedHard < sourceHard) direction = 'decrease';
+
+            let soft = requestedSoft;
+            let hard = requestedHard;
+            let softAdjusted = false;
+            let hardAdjusted = false;
+            if (direction === 'increase' && sourceHard !== null && hard < sourceHard) {
+                hard = sourceHard;
+                hardAdjusted = true;
+            } else if (direction === 'decrease' && sourceHard !== null && hard > sourceHard) {
+                hard = sourceHard;
+                hardAdjusted = true;
+            }
+
+            adjusted[cycle] = {
+                soft,
+                hard,
+                requestedSoft,
+                requestedHard,
+                sourceSoft,
+                sourceHard,
+                direction,
+                softAdjusted,
+                hardAdjusted
+            };
+        });
+        return adjusted;
+    };
+
     const setControlledInputValue = (input, value) => {
         const nextValue = String(value);
         input.focus();
@@ -237,15 +289,19 @@ async function initBogyoCapSetAutomation() {
     const ensureBogyoConfirmationStyles = () => {
         if (bogyoConfirmationStyleReady) return;
         const css = [
-            '#schedulingui-bogyo-confirm{background:#111;color:#fff;border:2px solid #fff;border-radius:8px;padding:18px;min-width:820px;max-width:92vw;box-sizing:border-box;font-family:Arial,sans-serif;font-size:12px;box-shadow:0 6px 24px rgba(0,0,0,.45);}',
-            '#schedulingui-bogyo-confirm::backdrop{background:rgba(0,0,0,.65);}',
-            '#schedulingui-bogyo-confirm h2{color:#fff;margin:0 0 10px;padding:0 0 8px;border-bottom:2px solid #fff;font-size:18px;}',
-            '#schedulingui-bogyo-confirm p{color:#fff;margin:8px 0;}',
-            '#schedulingui-bogyo-confirm table{width:100%;table-layout:fixed;border-collapse:collapse;background:#111;color:#fff;}',
-            '#schedulingui-bogyo-confirm thead{background:#1b3a34;}',
-            '#schedulingui-bogyo-confirm tbody tr:nth-child(even){background:#1a1a1a;}',
-            '#schedulingui-bogyo-confirm th,#schedulingui-bogyo-confirm td{width:auto;border:1px solid #666;padding:6px;text-align:center;white-space:nowrap;color:#fff;}',
-            '#schedulingui-bogyo-confirm th{color:#a5d6a7;font-weight:bold;}',
+            '#schedulingui-bogyo-confirm{background:#fff;color:#333;border:2px solid #fff;border-radius:8px;padding:18px;min-width:820px;max-width:96vw;box-sizing:border-box;font-family:Arial,sans-serif;font-size:12px;box-shadow:0 6px 24px rgba(0,0,0,.35);}',
+            '#schedulingui-bogyo-confirm::backdrop{background:rgba(0,0,0,.55);}',
+            '#schedulingui-bogyo-confirm h2{color:#333;margin:0 0 10px;padding:0 0 8px;border-bottom:2px solid #fff;font-size:18px;}',
+            '#schedulingui-bogyo-confirm p{color:#333;margin:8px 0;}',
+            '#schedulingui-bogyo-confirm table{width:100%;table-layout:fixed;border-collapse:separate;border-spacing:0 3px;background:#fff;color:#333;}',
+            '#schedulingui-bogyo-confirm thead{background:#fff;}',
+            '#schedulingui-bogyo-confirm th,#schedulingui-bogyo-confirm td{width:auto;border:none;padding:7px 6px;text-align:center;white-space:nowrap;color:#333;}',
+            '#schedulingui-bogyo-confirm th{color:#666;font-weight:bold;}',
+            '#schedulingui-bogyo-confirm tbody td{background:#f7f7f7;}',
+            '#schedulingui-bogyo-confirm .bogyo-soft-col{background:#e3f2fd;color:#1e88e5;font-weight:bold;}',
+            '#schedulingui-bogyo-confirm .bogyo-hard-col{background:#f3e5f5;color:#9c27b0;font-weight:bold;}',
+            '#schedulingui-bogyo-confirm thead th{background:#fff9c4!important;color:#555!important;}',
+            '#schedulingui-bogyo-confirm .bogyo-cap-corrected{color:#ef5350!important;font-weight:bold;}',
             '#schedulingui-bogyo-confirm button{background:#222;color:#fff;border:1px solid #aaa;border-radius:3px;padding:4px 8px;font-weight:bold;cursor:pointer;}',
             '#schedulingui-bogyo-confirm button[aria-pressed="false"]{background:#c62828;border-color:#ef9a9a;}',
             '#schedulingui-bogyo-confirm button[aria-pressed="true"]{background:#00796b;border-color:#80cbc4;}',
@@ -258,7 +314,8 @@ async function initBogyoCapSetAutomation() {
             '#schedulingui-bogyo-confirm .bogyo-cap-arrow{display:inline-block;margin-left:6px;border:none;padding:0;font-family:"Segoe UI Symbol","Arial Unicode MS",sans-serif;font-size:16px;font-weight:bold;line-height:1;vertical-align:middle;}',
             '#schedulingui-bogyo-confirm .bogyo-cap-arrow-up{color:#42a5f5;transform:rotate(-90deg);}',
             '#schedulingui-bogyo-confirm .bogyo-cap-arrow-down{color:#ef5350;transform:rotate(90deg);}',
-            '#schedulingui-bogyo-confirm .bogyo-cap-arrow-same{color:#aaa;transform:none;}'
+            '#schedulingui-bogyo-confirm .bogyo-cap-arrow-same{color:#aaa;transform:none;}',
+            '#schedulingui-bogyo-status{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:2147483647;min-width:180px;padding:24px 40px;border-radius:8px;background:rgba(0,0,0,.82);color:#fff;font:700 28px/1.4 Arial,sans-serif;text-align:center;box-shadow:0 4px 16px rgba(0,0,0,.35);pointer-events:none;}'
         ].join('');
         try {
             if (typeof CSSStyleSheet === 'function' && 'adoptedStyleSheets' in document) {
@@ -294,7 +351,6 @@ async function initBogyoCapSetAutomation() {
         dialog.appendChild(guide);
 
         const table = document.createElement('table');
-        table.setAttribute('border', '1');
         table.setAttribute('cellpadding', '6');
         table.setAttribute('cellspacing', '0');
         const thead = document.createElement('thead');
@@ -302,6 +358,8 @@ async function initBogyoCapSetAutomation() {
         ['実行', 'Cycle', 'Before Soft', 'After Soft', 'Before Hard', 'After Hard'].forEach(text => {
             const th = document.createElement('th');
             th.textContent = text;
+            if (text.includes('Soft')) th.classList.add('bogyo-soft-col');
+            if (text.includes('Hard')) th.classList.add('bogyo-hard-col');
             headerRow.appendChild(th);
         });
         thead.appendChild(headerRow);
@@ -313,16 +371,11 @@ async function initBogyoCapSetAutomation() {
             const info = findBogyoCycleRow(cycle);
             if (!info) return;
             const cells = info.row.querySelectorAll('td');
-            const readNumber = index => {
-                const text = normalizeText(cells[index]?.textContent).replace(/,/g, '');
-                if (text === '' || text === '-') return null;
-                const value = Number(text);
-                return Number.isFinite(value) ? value : null;
-            };
-            const beforeSoft = readNumber(info.softIndex);
-            const beforeHard = readNumber(info.hardIndex);
-            const afterSoft = Math.round(Number(targetCaps[cycle].soft));
-            const afterHard = Math.round(Number(targetCaps[cycle].hard));
+            const beforeSoft = readBogyoCellNumber(cells, info.softIndex);
+            const beforeHard = readBogyoCellNumber(cells, info.hardIndex);
+            const cap = targetCaps[cycle];
+            const afterSoft = Number(cap.soft);
+            const afterHard = Number(cap.hard);
             const unchanged = beforeSoft === afterSoft && beforeHard === afterHard;
             enabled[cycle] = !unchanged;
 
@@ -340,15 +393,18 @@ async function initBogyoCapSetAutomation() {
             toggleCell.appendChild(toggle);
             row.appendChild(toggleCell);
 
-            const appendTextCell = value => {
+            const appendTextCell = (value, className) => {
                 const td = document.createElement('td');
                 td.textContent = String(value);
+                if (className) td.className = className;
                 row.appendChild(td);
             };
             appendTextCell(cycle);
-            appendTextCell(beforeSoft === null ? '-' : beforeSoft);
+            appendTextCell(beforeSoft === null ? '-' : beforeSoft, 'bogyo-soft-col');
 
             const afterSoftCell = document.createElement('td');
+            afterSoftCell.classList.add('bogyo-soft-col');
+            if (cap.softAdjusted) afterSoftCell.classList.add('bogyo-cap-corrected');
             afterSoftCell.appendChild(document.createTextNode(String(afterSoft)));
             const softChange = beforeSoft === null ? 0 : Math.sign(afterSoft - beforeSoft);
             const arrow = document.createElement('span');
@@ -360,9 +416,11 @@ async function initBogyoCapSetAutomation() {
             afterSoftCell.appendChild(arrow);
             row.appendChild(afterSoftCell);
 
-            appendTextCell(beforeHard === null ? '-' : beforeHard);
+            appendTextCell(beforeHard === null ? '-' : beforeHard, 'bogyo-hard-col');
 
             const afterHardCell = document.createElement('td');
+            afterHardCell.classList.add('bogyo-hard-col');
+            if (cap.hardAdjusted) afterHardCell.classList.add('bogyo-cap-corrected');
             afterHardCell.appendChild(document.createTextNode(String(afterHard)));
             const hardChange = beforeHard === null ? 0 : Math.sign(afterHard - beforeHard);
             const hardArrow = document.createElement('span');
@@ -421,11 +479,25 @@ async function initBogyoCapSetAutomation() {
 
     const completedCycles = [];
     const skippedCycles = [];
-    const originalPageTitle = document.title;
+    let bogyoStatusElement = null;
     const setBogyoStatus = (text) => {
-        document.title = text ? text + ' | ' + originalPageTitle : originalPageTitle;
+        if (!text) {
+            bogyoStatusElement?.remove();
+            bogyoStatusElement = null;
+            return;
+        }
+        ensureBogyoConfirmationStyles();
+        if (!bogyoStatusElement || !bogyoStatusElement.isConnected) {
+            bogyoStatusElement = document.createElement('div');
+            bogyoStatusElement.id = 'schedulingui-bogyo-status';
+            bogyoStatusElement.setAttribute('role', 'status');
+            bogyoStatusElement.setAttribute('aria-live', 'polite');
+            document.body.appendChild(bogyoStatusElement);
+        }
+        bogyoStatusElement.textContent = text;
     };
 
+    setBogyoStatus('Setting…');
     try {
         if (window.location.pathname !== '/ssd-updates') {
             const ssdUpdatesLink = await waitFor(() => document.querySelector('a[href="/ssd-updates"]'));
@@ -435,7 +507,6 @@ async function initBogyoCapSetAutomation() {
             if (!moved) throw new Error('SSD Updates画面を開けませんでした');
         }
 
-        setBogyoStatus('準備中…');
         await sleep(500);
 
         const visibleInputs = await waitFor(() => {
@@ -533,7 +604,8 @@ async function initBogyoCapSetAutomation() {
         if (!sourceCapsLoaded) throw new Error('BOGYOのOTR・CvP・Soft Cap・Hard Capが読み込まれませんでした');
 
         setBogyoStatus('CapSet確認待ち…');
-        const cyclesToProcess = await showBogyoCapSetConfirmation(targetCycles, targetCaps);
+        const adjustedTargetCaps = buildAdjustedBogyoCaps(targetCycles, targetCaps);
+        const cyclesToProcess = await showBogyoCapSetConfirmation(targetCycles, adjustedTargetCaps);
         if (!cyclesToProcess) {
             console.info('[SchedulingUI] BOGYO CapSetはユーザーによりキャンセルされました:', targetDate, targetNode);
             return;
@@ -543,9 +615,9 @@ async function initBogyoCapSetAutomation() {
         const completedReasons = {};
         for (let cycleIndex = 0; cycleIndex < cyclesToProcess.length; cycleIndex++) {
             const targetCycle = cyclesToProcess[cycleIndex];
-            const targetCap = targetCaps[targetCycle];
-            const softValue = Math.round(Number(targetCap.soft));
-            const hardValue = Math.round(Number(targetCap.hard));
+            const targetCap = adjustedTargetCaps[targetCycle];
+            const softValue = Number(targetCap.soft);
+            const hardValue = Number(targetCap.hard);
             setBogyoStatus(targetCycle + ' 入力中…');
 
             const cycleRowInfo = await waitFor(() => findBogyoCycleRow(targetCycle), 30000);
@@ -559,6 +631,31 @@ async function initBogyoCapSetAutomation() {
                 console.info('[SchedulingUI] BOGYO CapSet変更不要:', targetCycle, { soft: softValue, hard: hardValue });
                 continue;
             }
+
+            const sourceSoft = Number(targetCap.sourceSoft);
+            const sourceHard = Number(targetCap.sourceHard);
+            const isIncrease = targetCap.direction === 'increase' &&
+                Number.isFinite(sourceSoft) && Number.isFinite(sourceHard) &&
+                softValue >= sourceSoft && hardValue >= sourceHard &&
+                (softValue > sourceSoft || hardValue > sourceHard);
+            const isDecrease = targetCap.direction === 'decrease' &&
+                Number.isFinite(sourceSoft) && Number.isFinite(sourceHard) &&
+                softValue <= sourceSoft && hardValue <= sourceHard &&
+                (softValue < sourceSoft || hardValue < sourceHard);
+            if (!isIncrease && !isDecrease) {
+                skippedCycles.push(targetCycle);
+                completedReasons[targetCycle] = 'スキップ（基準Cap方向不一致）';
+                console.warn('[SchedulingUI] BOGYO CapSetスキップ（基準Cap方向不一致）:', targetCycle, {
+                    sourceSoft,
+                    targetSoft: softValue,
+                    sourceHard,
+                    targetHard: hardValue
+                });
+                continue;
+            }
+            const expectedReason = isIncrease
+                ? 'Increase - OTR Capacity Adjustment'
+                : 'Decrease - OTR capacity';
 
             const softCell = initialCells[cycleRowInfo.softIndex];
             const editButton = softCell && softCell.querySelector('button[aria-label^="Edit DS Soft Cap"]');
@@ -644,6 +741,9 @@ async function initBogyoCapSetAutomation() {
             const selectedReason = normalizeBogyoReasonText(reasonOption.getAttribute('aria-label') || reasonOption.textContent);
             if (/\bOTHER\b/i.test(selectedReason)) {
                 throw new Error(targetCycle + ' でOther Reasonが候補になったため停止しました');
+            }
+            if (selectedReason !== expectedReason) {
+                throw new Error(targetCycle + ' のReasonが想定と一致しません（想定: ' + expectedReason + ' / 候補: ' + selectedReason + '）');
             }
             clickLikeUser(reasonOption);
 
