@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SchedulingUI
 // @namespace    https://github.com/yuyna-amazon/SchedulingUI
-// @version      23.7
+// @version      23.8
 // @description  Amazon Logistics SchedulingUI
 // @author       yuyna
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=amazon.com
@@ -285,6 +285,106 @@ async function initBogyoCapSetAutomation() {
 
     const findBogyoReasonChoice = (trigger) => findVisibleDropdownChoices(trigger)[0] || null;
 
+    const createBogyoConfirmationTableImage = async (table) => {
+        const tableRect = table.getBoundingClientRect();
+        const firstHeader = table.querySelector('thead th');
+        const firstColumnWidth = firstHeader ? firstHeader.getBoundingClientRect().width : 0;
+        const width = Math.max(1, Math.ceil(tableRect.width - firstColumnWidth));
+        const height = Math.max(1, Math.ceil(tableRect.height));
+        const clone = table.cloneNode(true);
+        clone.querySelectorAll('tr').forEach(row => row.firstElementChild?.remove());
+        clone.querySelector('#schedulingui-bogyo-copy-image')?.remove();
+        clone.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
+        clone.style.cssText = 'width:100%;table-layout:fixed;border-collapse:separate;border-spacing:0 3px;background:#fff;color:#333;font:12px Arial,sans-serif;';
+
+        clone.querySelectorAll('th,td').forEach(cell => {
+            const isHeader = cell.tagName === 'TH';
+            let background = isHeader ? '#FFF9C4' : '#F7F7F7';
+            let color = isHeader ? '#555555' : '#333333';
+            if (!isHeader && cell.classList.contains('bogyo-soft-col')) {
+                background = '#E3F2FD';
+                color = '#1E88E5';
+            }
+            if (!isHeader && cell.classList.contains('bogyo-hard-col')) {
+                background = '#F3E5F5';
+                color = '#9C27B0';
+            }
+            if (cell.classList.contains('bogyo-cap-corrected')) color = '#EF5350';
+            cell.style.cssText = 'width:auto;border:none;padding:7px 6px;text-align:center;white-space:nowrap;' +
+                'background:' + background + ';color:' + color + ';font-weight:' +
+                (isHeader || cell.classList.contains('bogyo-soft-col') || cell.classList.contains('bogyo-hard-col') ? '700' : '400') + ';';
+        });
+        clone.querySelectorAll('.bogyo-cap-arrow').forEach(arrow => {
+            let color = '#AAAAAA';
+            let transform = 'none';
+            if (arrow.classList.contains('bogyo-cap-arrow-up')) { color = '#42A5F5'; transform = 'rotate(-90deg)'; }
+            if (arrow.classList.contains('bogyo-cap-arrow-down')) { color = '#EF5350'; transform = 'rotate(90deg)'; }
+            arrow.style.cssText = 'display:inline-block;margin-left:6px;color:' + color + ';font:700 16px/1 "Segoe UI Symbol",sans-serif;transform:' + transform + ';';
+        });
+
+        const wrapper = document.createElement('div');
+        wrapper.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
+        wrapper.style.cssText = 'width:' + width + 'px;height:' + height + 'px;background:#fff;overflow:hidden;';
+        wrapper.appendChild(clone);
+        const serialized = new XMLSerializer().serializeToString(wrapper);
+        const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + width + '" height="' + height + '">' +
+            '<foreignObject width="100%" height="100%">' + serialized + '</foreignObject></svg>';
+        const svgBlob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
+
+        let drawable;
+        let bitmap = null;
+        try {
+            bitmap = await createImageBitmap(svgBlob);
+            drawable = bitmap;
+        } catch (error) {
+            const url = URL.createObjectURL(svgBlob);
+            try {
+                const image = new Image();
+                image.src = url;
+                await image.decode();
+                drawable = image;
+            } finally {
+                URL.revokeObjectURL(url);
+            }
+        }
+
+        const scale = 2;
+        const canvas = document.createElement('canvas');
+        canvas.width = width * scale;
+        canvas.height = height * scale;
+        const context = canvas.getContext('2d');
+        context.fillStyle = '#FFFFFF';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.scale(scale, scale);
+        context.drawImage(drawable, 0, 0, width, height);
+        bitmap?.close();
+
+        let outputCanvas = canvas;
+        try {
+            const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+            let lastContentY = canvas.height - 1;
+            outer: for (; lastContentY >= 0; lastContentY--) {
+                const rowOffset = lastContentY * canvas.width * 4;
+                for (let x = 0; x < canvas.width; x++) {
+                    const offset = rowOffset + x * 4;
+                    if (pixels[offset] < 250 || pixels[offset + 1] < 250 || pixels[offset + 2] < 250) break outer;
+                }
+            }
+            const croppedHeight = Math.min(canvas.height, Math.max(scale, lastContentY + 1 + scale));
+            if (croppedHeight < canvas.height) {
+                outputCanvas = document.createElement('canvas');
+                outputCanvas.width = canvas.width;
+                outputCanvas.height = croppedHeight;
+                outputCanvas.getContext('2d').drawImage(canvas, 0, 0);
+            }
+        } catch (error) { }
+
+        const pngBlob = await new Promise((resolve, reject) => {
+            outputCanvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('PNG画像を作成できませんでした')), 'image/png');
+        });
+        return pngBlob;
+    };
+
     let bogyoConfirmationStyleReady = false;
     const ensureBogyoConfirmationStyles = () => {
         if (bogyoConfirmationStyleReady) return;
@@ -309,8 +409,10 @@ async function initBogyoCapSetAutomation() {
             '#schedulingui-bogyo-confirm button[aria-pressed="false"]:disabled{background:#8e0000;color:#ddd;border-color:#ef9a9a;}',
             '#schedulingui-bogyo-actions{text-align:right;margin-top:12px;}',
             '#schedulingui-bogyo-actions button{min-width:72px;padding:6px 12px;}',
+            '#schedulingui-bogyo-copy-actions{text-align:right;margin:4px 0 6px;}',
             '#schedulingui-bogyo-execute{background:#00796b!important;border-color:#80cbc4!important;color:#fff!important;}',
             '#schedulingui-bogyo-cancel{background:#37474f!important;border-color:#78909c!important;color:#fff!important;}',
+            '#schedulingui-bogyo-copy-image{min-width:72px!important;margin:0;padding:6px 12px!important;background:#1e88e5!important;border-color:#90caf9!important;color:#fff!important;font-size:12px!important;}',
             '#schedulingui-bogyo-confirm .bogyo-cap-arrow{display:inline-block;margin-left:6px;border:none;padding:0;font-family:"Segoe UI Symbol","Arial Unicode MS",sans-serif;font-size:16px;font-weight:bold;line-height:1;vertical-align:middle;}',
             '#schedulingui-bogyo-confirm .bogyo-cap-arrow-up{color:#42a5f5;transform:rotate(-90deg);}',
             '#schedulingui-bogyo-confirm .bogyo-cap-arrow-down{color:#ef5350;transform:rotate(90deg);}',
@@ -349,6 +451,16 @@ async function initBogyoCapSetAutomation() {
         const guide = document.createElement('p');
         guide.textContent = 'ONのCycleだけCapSetします。内容を確認してから実行してください。';
         dialog.appendChild(guide);
+
+        const copyActions = document.createElement('p');
+        copyActions.id = 'schedulingui-bogyo-copy-actions';
+        const copyImageButton = document.createElement('button');
+        copyImageButton.id = 'schedulingui-bogyo-copy-image';
+        copyImageButton.type = 'button';
+        copyImageButton.textContent = '画像コピー';
+        copyImageButton.title = 'CycleからAfter Hardまでを画像としてクリップボードへコピー';
+        copyActions.appendChild(copyImageButton);
+        dialog.appendChild(copyActions);
 
         const table = document.createElement('table');
         table.setAttribute('cellpadding', '6');
@@ -436,6 +548,27 @@ async function initBogyoCapSetAutomation() {
         table.appendChild(tbody);
         dialog.appendChild(table);
 
+        let copyImageBlob = null;
+        const canCopyImage = !!(navigator.clipboard && typeof navigator.clipboard.write === 'function' && typeof ClipboardItem === 'function');
+        if (copyImageButton) {
+            copyImageButton.disabled = true;
+            copyImageButton.textContent = canCopyImage ? '準備中…' : '非対応';
+            if (!canCopyImage) copyImageButton.title = 'このブラウザでは画像のクリップボードコピーを利用できません';
+            copyImageButton.addEventListener('click', async () => {
+                if (!copyImageBlob) return;
+                try {
+                    await navigator.clipboard.write([new ClipboardItem({ 'image/png': copyImageBlob })]);
+                    copyImageButton.textContent = 'コピー済み';
+                    setTimeout(() => {
+                        if (copyImageButton?.isConnected) copyImageButton.textContent = '画像コピー';
+                    }, 1500);
+                } catch (error) {
+                    console.error('[SchedulingUI] 確認表の画像コピーに失敗しました', error);
+                    alert('画像をクリップボードへコピーできませんでした。\n' + error.message);
+                }
+            });
+        }
+
         const actions = document.createElement('p');
         actions.id = 'schedulingui-bogyo-actions';
         const executeButton = document.createElement('button');
@@ -475,6 +608,24 @@ async function initBogyoCapSetAutomation() {
 
         document.body.appendChild(dialog);
         dialog.showModal();
+        if (copyImageButton && canCopyImage) {
+            requestAnimationFrame(async () => {
+                try {
+                    copyImageBlob = await createBogyoConfirmationTableImage(table);
+                    if (copyImageButton.isConnected) {
+                        copyImageButton.disabled = false;
+                        copyImageButton.textContent = '画像コピー';
+                    }
+                } catch (error) {
+                    console.error('[SchedulingUI] 確認表の画像作成に失敗しました', error);
+                    if (copyImageButton.isConnected) {
+                        copyImageButton.disabled = true;
+                        copyImageButton.textContent = '作成失敗';
+                        copyImageButton.title = error.message;
+                    }
+                }
+            });
+        }
     });
 
     const completedCycles = [];
@@ -787,6 +938,8 @@ async function initBogyoCapSetAutomation() {
         }
 
         setBogyoStatus(skippedCycles.length ? 'CapSet完了（一部スキップ）' : 'CapSet完了');
+        await sleep(600);
+        setBogyoStatus('');
         const reasonSummary = cyclesToProcess.map(cycle => cycle + ': ' + (completedReasons[cycle] || '未処理')).join('\n');
         alert('BOGYO CapSetが完了しました。\n' + reasonSummary);
         console.info('[SchedulingUI] BOGYO CapSet完了:', targetDate, targetNode, {
@@ -801,6 +954,7 @@ async function initBogyoCapSetAutomation() {
         const skippedMessage = skippedCycles.length
             ? '\nスキップ済み: ' + skippedCycles.join(', ')
             : '';
+        setBogyoStatus('');
         alert('BOGYO CapSetの自動入力に失敗しました。' + completedMessage + skippedMessage + '\n' + error.message);
     } finally {
         setBogyoStatus('');
